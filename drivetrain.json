@@ -1,0 +1,7 @@
+{
+  "model": "SRAM Force AXS",
+  "source": "user-confirmed",
+  "cassette_teeth_smallest_to_largest": [10, 11, 12, 13, 14, 15, 17, 19, 21, 24, 28, 33],
+  "chainring_teeth_smallest_to_largest": [35, 48],
+  "ble_position_mapping": null
+}

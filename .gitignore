@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+data/
+.pytest_cache/
+.secrets/
+
+.telemetry.lock
