@@ -1,6 +1,6 @@
 const keys=['cardio','duo','front','rear','sram'];
 const names={cardio:'COOSPO H808S',duo:'DuoTrap S',front:'Ion Pro RT · front',rear:'Flare RT · rear',sram:'SRAM Force AXS · 2×12'};
-const cards={ble:{},ant:{}};
+const cards={};
 const sramBatteryOrder=['front derailleur','rear derailleur','left shifter','right shifter'];
 function fieldRank(card,label){
  const lower=label.toLowerCase();
@@ -10,7 +10,7 @@ function fieldRank(card,label){
  return component<0?105:101+component;
 }
 function el(tag,cls,value){const n=document.createElement(tag);if(cls)n.className=cls;if(value!==undefined)n.textContent=value;return n}
-for(const protocol of ['ble','ant'])for(const key of keys){const card=el('section','sensor'),head=el('div','sensor-head'),title=el('h3','',names[key]),metrics=el('span','metrics'),signal=el('span','signal');head.append(title,metrics);const status=el('div','status','Waiting…'),table=el('table','fields'),error=el('div','error');card.append(head,status,signal,table,error);document.querySelector(`#${protocol}-cards`).append(card);cards[protocol][key]={card,key,metrics,signal,status,table,error,rows:new Map()}}
+for(const key of keys){const card=el('section','sensor'),head=el('div','sensor-head'),title=el('h3','',names[key]),metrics=el('span','metrics'),signal=el('span','signal');head.append(title,metrics);const status=el('div','status','Waiting…'),table=el('table','fields'),error=el('div','error');card.append(head,status,signal,table,error);document.querySelector('#ant-cards').append(card);cards[key]={card,key,metrics,signal,status,table,error,rows:new Map()}}
 let last=null,lastAt=0,online=false;
 const fmt=v=>v==null?'—':v.toFixed(1);
 function renderSection(c,s,elapsed,active){if(!s)return;c.status.textContent=s.status||'Waiting…';c.error.textContent=s.error||'';
@@ -32,18 +32,16 @@ function renderSection(c,s,elapsed,active){if(!s)return;c.status.textContent=s.s
  const labels=new Set(fields.map(f=>f.label));for(const [label,row] of c.rows)if(!labels.has(label)){row.value.parentElement.remove();c.rows.delete(label)}
  for(const f of fields){let row=c.rows.get(f.label);if(!row){const tr=el('tr'),label=el('td','',f.label),value=el('td'),age=el('td');tr.append(label,value,age);row={value,age};c.rows.set(f.label,row)}row.value.textContent=f.value;row.value.className=f.changed&&active&&elapsed<2?'changed':'';row.age.textContent=f.age_s==null?'—':`${f.saved?'saved · ':''}${Math.floor(f.age_s+elapsed)} s`;c.table.append(row.value.parentElement)}
  c.card.classList.toggle('stale',!active||(s.packet_age_s!=null&&s.packet_age_s+elapsed>10))}
-function draw(){const elapsed=(performance.now()-lastAt)/1000,active=online&&last&&last.state==='running'&&elapsed<4;
- const badge=document.querySelector('#connection');badge.textContent=active?'● Live':online?'Collector inactive':'Disconnected';badge.className='pill '+(active?'ok':'warn');
- const banner=document.querySelector('#banner'),error=!online?'Connection to Raspberry lost. Reconnecting…':last?.error||(last?.state==='stopped'?'Collection stopped.':'');banner.textContent=error;banner.style.display=error?'block':'none';
- const ble=last?.sections_ble||last?.sections||{},ant=last?.sections_ant||{};
- for(const key of keys){renderSection(cards.ble[key],ble[key],elapsed,active);renderSection(cards.ant[key],ant[key],elapsed,online)}
+function draw(){const elapsed=(performance.now()-lastAt)/1000,active=online&&elapsed<4;
+ const badge=document.querySelector('#connection');badge.textContent=active?'● Live':'Disconnected';badge.className='pill '+(active?'ok':'warn');
+ const banner=document.querySelector('#banner'),error=!online?'Connection to Raspberry lost. Reconnecting…':'';banner.textContent=error;banner.style.display=error?'block':'none';
+ const ant=last?.sections_ant||{};
+ for(const key of keys)renderSection(cards[key],ant[key],elapsed,active);
  const bpm=(sections)=>{const s=sections.cardio,f=s?.fields?.find(f=>f.label==='Heart rate');return s?.status==='connected'&&f&&f.age_s+elapsed<10?f.value.replace(/\s*bpm$/,''):'—'};
- cards.ble.cardio.metrics.textContent=`${active?bpm(ble):'—'} bpm`;
- cards.ant.cardio.metrics.textContent=`${online?bpm(ant):'—'} bpm`;
- cards.ble.duo.metrics.textContent=`${active?fmt(ble.duo?.speed_kmh):'—'} km/h · ${active?fmt(ble.duo?.cadence_rpm):'—'} rpm`;
- cards.ant.duo.metrics.textContent=`${online?fmt(ant.duo?.speed_kmh):'—'} km/h · ${online?fmt(ant.duo?.cadence_rpm):'—'} rpm`;
+ cards.cardio.metrics.textContent=`${active?bpm(ant):'—'} bpm`;
+ cards.duo.metrics.textContent=`${active?fmt(ant.duo?.speed_kmh):'—'} km/h · ${active?fmt(ant.duo?.cadence_rpm):'—'} rpm`;
  const shift=ant.sram?.fields?.find(f=>f.label==='Gear');
- cards.ant.sram.metrics.textContent=online&&shift&&shift.age_s+elapsed<10?shift.value:'—';
+ cards.sram.metrics.textContent=active&&shift&&shift.age_s+elapsed<10?shift.value:'—';
  document.querySelector('#recording').textContent=last?.log?`${active?'Recording':'Last log'}: ${last.log}`:'Waiting for collection…';
  if(last?.wheel_circumference_m)document.querySelector('#wheel').textContent=`Wheel circumference: ${last.wheel_circumference_m.toFixed(3)} m`;
 }
