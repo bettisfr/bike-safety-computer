@@ -13,6 +13,10 @@ LIGHT_MODES = {
     6: "Slow flash", 7: "Fast flash", 8: "Random flash", 9: "Auto",
 }
 SHIFT_BATTERY = {1: "New/Full", 2: "Good", 3: "OK", 4: "Low", 5: "Critical", 6: "Charging"}
+SRAM_BATTERY_LABELS = (
+    "Battery · Front derailleur", "Battery · Rear derailleur",
+    "Battery · Left shifter", "Battery · Right shifter",
+)
 
 
 class ANTRotation:
@@ -70,10 +74,48 @@ class ANTSensorCollector:
             "sram": {"name": "SRAM Force AXS", "status": "initializing ANT+",
                      "error": "", "rssi": None, "fields": []},
         }
+        self.battery_cache_path = Path(__file__).with_name("data") / "ant_sram_batteries.json"
+        self.battery_cache = self._load_sram_batteries()
+        now = time.monotonic()
+        wall_now = time.time()
+        for label in SRAM_BATTERY_LABELS:
+            saved = self.battery_cache.get(label)
+            observed_at = saved.get("observed_at") if isinstance(saved, dict) else None
+            if isinstance(observed_at, (int, float)) and 0 < observed_at <= wall_now:
+                updated = now - (wall_now - observed_at)
+                value = str(saved.get("value", "Waiting for ANT+"))
+                from_cache = True
+            else:
+                updated, value = None, "Waiting for ANT+"
+                from_cache = False
+            self.state["sram"]["fields"].append({
+                "label": label, "value": value, "updated": updated,
+                "changed_at": float("-inf"), "saved": from_cache,
+            })
         self.received_at = {key: None for key in self.state}
         self.wheel = ANTRotation()
         self.crank = ANTRotation()
         self.thread = threading.Thread(target=self._run, name="bike-ant", daemon=True)
+
+    def _load_sram_batteries(self):
+        try:
+            cached = json.loads(self.battery_cache_path.read_text())
+            return cached if isinstance(cached, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError):
+            LOG.warning("Could not read saved ANT+ SRAM batteries", exc_info=True)
+            return {}
+
+    def _save_sram_battery(self, label, value):
+        self.battery_cache[label] = {"value": value, "observed_at": time.time()}
+        try:
+            self.battery_cache_path.parent.mkdir(exist_ok=True)
+            temporary = self.battery_cache_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.battery_cache, indent=2) + "\n")
+            temporary.replace(self.battery_cache_path)
+        except OSError:
+            LOG.warning("Could not save ANT+ SRAM battery", exc_info=True)
 
     def snapshot(self):
         now = time.monotonic()
@@ -83,7 +125,9 @@ class ANTSensorCollector:
                             if self.received_at[key] is not None else None,
                             "fields": [
                                 {"label": field["label"], "value": field["value"],
-                                 "age_s": now - field["updated"],
+                                 "age_s": now - field["updated"]
+                                 if field["updated"] is not None else None,
+                                 "saved": field.get("saved", False),
                                  "changed": now - field["changed_at"] < 2}
                                 for field in section["fields"]]}
                       for key, section in self.state.items()}
@@ -242,11 +286,14 @@ class ANTSensorCollector:
                         }.get(battery_id, f"component {battery_id}")
                         voltage = (data[7] & 0x0F) + data[6] / 256
                         status = (data[7] >> 4) & 7
-                        values[f"Battery · {component}"] = (
+                        label = f"Battery · {component}"
+                        values[label] = (
                             f"{voltage:.2f} V · {SHIFT_BATTERY.get(status, 'Unknown')}")
                     else:
                         return
                     self._record("sram", values)
+                    if data[0] == 82 and label in SRAM_BATTERY_LABELS:
+                        self._save_sram_battery(label, values[label])
 
                 cardio.channel.on_broadcast_data = cardio_packet
                 duo.channel.on_broadcast_data = duo_packet

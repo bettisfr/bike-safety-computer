@@ -30,7 +30,7 @@ function renderSection(c,s,elapsed,active){if(!s)return;c.status.textContent=s.s
  const fields=(s.fields||[]).filter(f=>!(c.key==='cardio'&&f.label==='Heart rate'));
  fields.sort((a,b)=>fieldRank(c,a.label)-fieldRank(c,b.label));
  const labels=new Set(fields.map(f=>f.label));for(const [label,row] of c.rows)if(!labels.has(label)){row.value.parentElement.remove();c.rows.delete(label)}
- for(const f of fields){let row=c.rows.get(f.label);if(!row){const tr=el('tr'),label=el('td','',f.label),value=el('td'),age=el('td');tr.append(label,value,age);row={value,age};c.rows.set(f.label,row)}row.value.textContent=f.value;row.value.className=f.changed&&active&&elapsed<2?'changed':'';row.age.textContent=`${Math.floor((f.age_s||0)+elapsed)} s`;c.table.append(row.value.parentElement)}
+ for(const f of fields){let row=c.rows.get(f.label);if(!row){const tr=el('tr'),label=el('td','',f.label),value=el('td'),age=el('td');tr.append(label,value,age);row={value,age};c.rows.set(f.label,row)}row.value.textContent=f.value;row.value.className=f.changed&&active&&elapsed<2?'changed':'';row.age.textContent=f.age_s==null?'—':`${f.saved?'saved · ':''}${Math.floor(f.age_s+elapsed)} s`;c.table.append(row.value.parentElement)}
  c.card.classList.toggle('stale',!active||(s.packet_age_s!=null&&s.packet_age_s+elapsed>10))}
 function draw(){const elapsed=(performance.now()-lastAt)/1000,active=online&&last&&last.state==='running'&&elapsed<4;
  const badge=document.querySelector('#connection');badge.textContent=active?'● Live':online?'Collector inactive':'Disconnected';badge.className='pill '+(active?'ok':'warn');
