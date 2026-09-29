@@ -13,14 +13,16 @@ and power meters are possible future additions.
 | COOSPO H808S | Heart rate, contact, RR intervals and battery when transmitted | Heart rate, beat count, event time and battery when transmitted |
 | Trek DuoTrap S | Wheel speed, crank cadence, counters and battery | Wheel speed, crank cadence and counters; no battery field in the combined ANT+ profile |
 | Trek Ion Pro RT / Flare RT | Mode and battery percentage; explicit on/off/flash commands | Reported mode, battery category and intensity when transmitted |
-| SRAM Force AXS 2×12 | Experimental battery-related fields and counters; gear position undecoded | Profile not yet integrated |
+| SRAM Force AXS 2×12 | Experimental battery-related fields and counters; gear position undecoded | Live 35/48 × 10–33 gear position, shift counter, battery voltage/status when transmitted |
 
 The device addresses in [ble_sensors.py](ble_sensors.py) belong to the bike used
 for development. Wheel speed currently uses a **2.136 m** circumference, an
 estimate for 700×28C tires; calibrate it on the actual wheel. The known
 drivetrain has 35/48 chainrings and a 10-11-12-13-14-15-17-19-21-24-28-33
-cassette, recorded in [drivetrain.json](drivetrain.json). Gear position is not
-estimated from speed and cadence.
+cassette, recorded in [drivetrain.json](drivetrain.json). ANT+ gear mapping was
+confirmed at 48×10 (rear index 11), 48×33 (rear index 0), and 35×33 (front
+index 0). Gear position is read from ANT+ shifting data, not estimated from
+speed and cadence.
 
 ## Code layout
 
@@ -28,7 +30,7 @@ estimated from speed and cadence.
   all BLE devices and logs measurements. The same file offers explicit `lights`,
   `sram`, `sram_bond`, `sram_batteries`, and `sram_records` maintenance commands.
 - [ant_sensors.py](ant_sensors.py) is the ANT+ library. `ANTSensorCollector`
-  receives heart rate, combined bike speed/cadence, and bicycle light
+  receives heart rate, combined bike speed/cadence, bicycle light and shifting
   broadcasts through the USB stick.
 - [web_server.py](web_server.py) joins the two collectors for one Flask API.
   [web.html](web.html) renders compact, separate BLE and ANT+ columns.
@@ -189,6 +191,13 @@ The characteristic was identified using
 Visual confirmation of the LEDs remains useful after a write.
 
 ## SRAM AXS diagnostics
+
+The ANT+ shifting channel (device type 34) provides the current front/rear
+gear indices, configured gear counts and shift event counter. The web page
+maps those indices to the user-confirmed 35/48 chainrings and 10–33 cassette
+in [drivetrain.json](drivetrain.json). It also displays battery voltage and
+status for each component when ANT+ battery page 82 is transmitted. The
+separate BLE SRAM card remains experimental.
 
 Wake the rear derailleur and disconnect the SRAM phone app before discovery.
 The inspection commands record the GATT service tree and selected readable

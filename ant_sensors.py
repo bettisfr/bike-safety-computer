@@ -1,7 +1,9 @@
 """ANT+ heart rate, bike speed/cadence, and bicycle light collection."""
+import json
 import logging
 import threading
 import time
+from pathlib import Path
 
 LOG = logging.getLogger("bike.ant")
 LIGHT_BATTERY = {1: "Full", 2: "Good", 3: "OK", 4: "Low", 5: "Critical", 6: "Charging"}
@@ -10,6 +12,7 @@ LIGHT_MODES = {
     3: "Steady 41–60%", 4: "Steady 21–40%", 5: "Steady 0–20%",
     6: "Slow flash", 7: "Fast flash", 8: "Random flash", 9: "Auto",
 }
+SHIFT_BATTERY = {1: "New/Full", 2: "Good", 3: "OK", 4: "Low", 5: "Critical", 6: "Charging"}
 
 
 class ANTRotation:
@@ -46,6 +49,12 @@ class ANTRotation:
 class ANTSensorCollector:
     def __init__(self, wheel_circumference=2.136):
         self.wheel_circumference = wheel_circumference
+        drivetrain = json.loads(Path(__file__).with_name("drivetrain.json").read_text())
+        mapping = drivetrain.get("ant_position_mapping") or {}
+        self.front_teeth = {int(index): teeth for index, teeth in
+                            mapping.get("front_index_to_teeth", {}).items()}
+        self.rear_teeth = (list(reversed(drivetrain["cassette_teeth_smallest_to_largest"]))
+                           if mapping.get("rear_index_zero_is_largest") else [])
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.node = None
@@ -57,6 +66,8 @@ class ANTSensorCollector:
             "front": {"name": "Ion Pro RT", "status": "initializing ANT+",
                       "error": "", "rssi": None, "fields": []},
             "rear": {"name": "Flare RT", "status": "initializing ANT+",
+                     "error": "", "rssi": None, "fields": []},
+            "sram": {"name": "SRAM Force AXS", "status": "initializing ANT+",
                      "error": "", "rssi": None, "fields": []},
         }
         self.received_at = {key: None for key in self.state}
@@ -129,7 +140,9 @@ class ANTSensorCollector:
                 cardio = Scanner(node, device_type=DeviceType.HeartRate.value, period=8070)
                 duo = Scanner(node, device_type=DeviceType.BikeSpeedCadence.value, period=8086)
                 lights = Scanner(node, device_type=35, period=4084)
+                shifting = Scanner(node, device_type=34, period=8192)
                 selected = {"cardio": None, "duo": None}
+                shifting_ids = set()
 
                 def cardio_packet(data):
                     cardio._on_data(data)
@@ -199,13 +212,53 @@ class ANTSensorCollector:
                         values["Intensity"] = f"{data[7]} %"
                     self._record(key, values)
 
+                def shifting_packet(data):
+                    if len(data) < 13 or data[11] != 34:
+                        return
+                    device_id = data[9] | data[10] << 8
+                    shifting_ids.add(device_id)
+                    values = {"ANT+ IDs": ", ".join(map(str, sorted(shifting_ids)))}
+                    if data[0] == 1:
+                        rear = data[3] & 0x1F
+                        front = data[3] >> 5
+                        rear_teeth = (self.rear_teeth[rear]
+                                      if rear < len(self.rear_teeth) else None)
+                        front_teeth = self.front_teeth.get(front)
+                        values.update({
+                            "Gear": (f"{front_teeth}×{rear_teeth}"
+                                     if front_teeth is not None and rear_teeth is not None
+                                     else "unavailable"),
+                            "Rear gear index": rear if rear != 31 else "unavailable",
+                            "Front gear index": front if front != 7 else "unavailable",
+                            "Rear gear count": data[4] & 0x1F,
+                            "Front gear count": data[4] >> 5,
+                            "Shift event counter": data[1],
+                            "Raw shifting page 1": bytes(data[:8]).hex(" "),
+                        })
+                    elif data[0] == 82:
+                        battery_id = data[2] >> 4 if data[2] != 0xFF else None
+                        component = {
+                            0: "system", 1: "front derailleur", 2: "rear derailleur",
+                            3: "left shifter", 4: "right shifter",
+                        }.get(battery_id, f"component {battery_id}")
+                        voltage = (data[7] & 0x0F) + data[6] / 256
+                        status = (data[7] >> 4) & 7
+                        values[f"Battery · {component} / ANT+ {device_id}"] = (
+                            f"{voltage:.2f} V · {SHIFT_BATTERY.get(status, 'Unknown')}")
+                        values[f"Raw battery page / ANT+ {device_id}"] = bytes(data[:8]).hex(" ")
+                    else:
+                        return
+                    self._record("sram", values)
+
                 cardio.channel.on_broadcast_data = cardio_packet
                 duo.channel.on_broadcast_data = duo_packet
                 lights.channel.on_broadcast_data = light_packet
+                shifting.channel.on_broadcast_data = shifting_packet
                 self._set_status("cardio", "listening on ANT+ · wear the chest strap")
                 self._set_status("duo", "listening on ANT+ · spin the wheel and crank")
                 self._set_status("front", "listening on ANT+ · turn on the light")
                 self._set_status("rear", "listening on ANT+ · turn on the light")
+                self._set_status("sram", "listening on ANT+ · press a shift button")
                 node.start()
             except Exception as exc:
                 if not self.stop_event.is_set():
