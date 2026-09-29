@@ -233,19 +233,17 @@ class ANTSensorCollector:
                             "Rear gear count": data[4] & 0x1F,
                             "Front gear count": data[4] >> 5,
                             "Shift event counter": data[1],
-                            "Raw shifting page 1": bytes(data[:8]).hex(" "),
                         })
                     elif data[0] == 82:
                         battery_id = data[2] >> 4 if data[2] != 0xFF else None
                         component = {
-                            0: "system", 1: "front derailleur", 2: "rear derailleur",
-                            3: "left shifter", 4: "right shifter",
+                            0: "System", 1: "Front derailleur", 2: "Rear derailleur",
+                            3: "Left shifter", 4: "Right shifter",
                         }.get(battery_id, f"component {battery_id}")
                         voltage = (data[7] & 0x0F) + data[6] / 256
                         status = (data[7] >> 4) & 7
-                        values[f"Battery · {component} / ANT+ {device_id}"] = (
+                        values[f"Battery · {component}"] = (
                             f"{voltage:.2f} V · {SHIFT_BATTERY.get(status, 'Unknown')}")
-                        values[f"Raw battery page / ANT+ {device_id}"] = bytes(data[:8]).hex(" ")
                     else:
                         return
                     self._record("sram", values)

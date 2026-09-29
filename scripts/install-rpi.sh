@@ -22,6 +22,7 @@ if [[ -f "$HOME/.config/systemd/user/bike-heart-rate.service" ]]; then
     rm -f "$HOME/.config/systemd/user/bike-heart-rate.service"
 fi
 rm -f "$APP/heart_rate.py"
+rm -f "$APP/web.html"
 mkdir -p data "$HOME/.config/systemd/user"
 cat > "$HOME/.config/systemd/user/bike-telemetry.service" <<'UNIT'
 [Unit]

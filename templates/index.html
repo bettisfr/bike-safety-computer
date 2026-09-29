@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bike · Telemetry</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main>
+<header><div><div class="eyebrow">Bike computer / live</div><h1>Bike telemetry</h1></div><div id="connection" class="pill">Connecting…</div></header>
+<div id="banner" class="banner" role="status"></div>
+<div class="protocols">
+ <section class="protocol"><div class="protocol-head"><h2>BLE</h2><span>Bluetooth Low Energy</span></div><div id="ble-cards" class="cards"></div></section>
+ <section class="protocol"><div class="protocol-head"><h2>ANT+</h2><span>USB dongle</span></div><div id="ant-cards" class="cards"></div></section>
+</div>
+<footer><div id="recording">Waiting for collection…</div><div id="wheel"></div><div>Yellow: recently changed value · Time on the right: reading age · —: no recent data.</div></footer>
+</main>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

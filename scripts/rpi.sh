@@ -7,13 +7,15 @@ if (($#)); then shift; fi
 SERVICE=bike-telemetry.service
 case "$ACTION" in
   deploy)
-    ssh "$HOST" 'mkdir -p "$HOME/bike-safety-computer"'
+    ssh "$HOST" 'mkdir -p "$HOME/bike-safety-computer/templates" "$HOME/bike-safety-computer/static"'
     rsync -a --itemize-changes -- \
-      "$ROOT/web_server.py" "$ROOT/web.html" "$ROOT/dashboard.py" \
+      "$ROOT/web_server.py" "$ROOT/dashboard.py" \
       "$ROOT/ble_sensors.py" "$ROOT/ant_sensors.py" "$ROOT/README.md" \
       "$ROOT/drivetrain.json" "$ROOT/requirements.txt" \
       "$ROOT/scripts/install-rpi.sh" "$ROOT/scripts/42-ant-usb-sticks.rules" \
       "$ROOT/scripts/blacklist-ant-serial.conf" "$HOST:bike-safety-computer/"
+    rsync -a --itemize-changes -- "$ROOT/templates/" "$HOST:bike-safety-computer/templates/"
+    rsync -a --itemize-changes -- "$ROOT/static/" "$HOST:bike-safety-computer/static/"
     ssh "$HOST" 'bash "$HOME/bike-safety-computer/install-rpi.sh"'
     ;;
   start|stop|restart|status)

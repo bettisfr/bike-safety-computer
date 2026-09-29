@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify, send_file
+from flask import Flask, jsonify, render_template
 from werkzeug.serving import make_server
 
 from ble_sensors import BikeTelemetry, TelemetryConfig
@@ -107,7 +107,7 @@ def create_app(collector):
 
     @app.get("/")
     def index():
-        return send_file(ROOT / "web.html")
+        return render_template("index.html")
 
     @app.get("/api/state")
     def state():

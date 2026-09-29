@@ -1,25 +1,14 @@
-<!doctype html>
-<html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Bike · Telemetry</title>
-<style>
-:root{color-scheme:light;--bg:#f5f7f5;--card:#fff;--line:#d7e0d9;--ink:#18251d;--muted:#506157;--green:#176c42;--amber:#925300}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px system-ui,sans-serif}main{max-width:1600px;margin:auto;padding:16px}header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}h1{font-size:22px;margin:0}.eyebrow{font-size:10px;letter-spacing:2px;color:var(--green);text-transform:uppercase}.pill{border:1px solid var(--line);border-radius:20px;padding:5px 10px;font-size:12px;white-space:nowrap}.ok{color:var(--green)}.warn{color:var(--amber)}.protocols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}.protocol{min-width:0}.protocol-head{display:flex;align-items:baseline;gap:10px;margin-bottom:7px}.protocol-head h2{font-size:18px;margin:0}.protocol-head span{color:var(--muted);font-size:11px}.cards{display:grid;gap:7px}.sensor{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:7px 10px;min-width:0}.sensor-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}.sensor h3{font-size:13px;margin:0}.metrics{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}.status,.signal{color:var(--muted);font-size:11px}.signal{white-space:nowrap}.status{margin:2px 0}.fields{width:100%;border-collapse:collapse;font-size:12px}.fields td{padding:2px 0;border-top:1px solid #edf0ed;vertical-align:top}.fields td:first-child{color:var(--muted);width:42%}.fields td:nth-child(2){font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.fields td:last-child{text-align:right;color:var(--muted);font-size:10px;white-space:nowrap}.changed{color:var(--amber)}.stale{opacity:.6}.error,.banner{color:var(--amber);font-size:11px;overflow-wrap:anywhere}.banner{display:none;border:1px solid var(--amber);border-radius:8px;padding:7px;margin-bottom:10px}footer{margin-top:10px;color:var(--muted);font-size:11px;line-height:1.5}@media(max-width:780px){.protocols{grid-template-columns:1fr}header{align-items:flex-start}}@media(prefers-reduced-motion:reduce){*{transition:none!important}}
-</style>
-<main>
-<header><div><div class="eyebrow">Bike computer / live</div><h1>Bike telemetry</h1></div><div id="connection" class="pill">Connecting…</div></header>
-<div id="banner" class="banner" role="status"></div>
-<div class="protocols">
- <section class="protocol"><div class="protocol-head"><h2>BLE</h2><span>Bluetooth Low Energy</span></div><div id="ble-cards" class="cards"></div></section>
- <section class="protocol"><div class="protocol-head"><h2>ANT+</h2><span>USB dongle</span></div><div id="ant-cards" class="cards"></div></section>
-</div>
-<footer><div id="recording">Waiting for collection…</div><div id="wheel"></div><div>Yellow: recently changed value · Time on the right: reading age · —: no recent data.</div></footer>
-</main>
-<script>
 const keys=['cardio','duo','front','rear','sram'];
 const names={cardio:'COOSPO H808S',duo:'DuoTrap S',front:'Ion Pro RT · front',rear:'Flare RT · rear',sram:'SRAM Force AXS · 2×12'};
 const cards={ble:{},ant:{}};
+const sramBatteryOrder=['front derailleur','rear derailleur','left shifter','right shifter'];
+function fieldRank(card,label){
+ const lower=label.toLowerCase();
+ if(!lower.includes('battery'))return 0;
+ if(card.key!=='sram')return 100;
+ const component=sramBatteryOrder.findIndex(name=>lower.includes(name));
+ return component<0?105:101+component;
+}
 function el(tag,cls,value){const n=document.createElement(tag);if(cls)n.className=cls;if(value!==undefined)n.textContent=value;return n}
 for(const protocol of ['ble','ant'])for(const key of keys){const card=el('section','sensor'),head=el('div','sensor-head'),title=el('h3','',names[key]),metrics=el('span','metrics'),signal=el('span','signal');head.append(title,metrics);const status=el('div','status','Waiting…'),table=el('table','fields'),error=el('div','error');card.append(head,status,signal,table,error);document.querySelector(`#${protocol}-cards`).append(card);cards[protocol][key]={card,key,metrics,signal,status,table,error,rows:new Map()}}
 let last=null,lastAt=0,online=false;
@@ -38,8 +27,10 @@ function renderSection(c,s,elapsed,active){if(!s)return;c.status.textContent=s.s
  }else if(s.packet_age_s!=null){
   c.signal.textContent=`RSSI unavailable · reading ${Math.floor(s.packet_age_s+elapsed)} s ago`;
  }else c.signal.textContent=s.rssi==null?'':`${s.rssi} dBm · advertisement ${Math.floor((s.advertisement_age_s||0)+elapsed)} s ago`;
- const fields=(s.fields||[]).filter(f=>!(c.key==='cardio'&&f.label==='Heart rate'));const labels=new Set(fields.map(f=>f.label));for(const [label,row] of c.rows)if(!labels.has(label)){row.value.parentElement.remove();c.rows.delete(label)}
- for(const f of fields){let row=c.rows.get(f.label);if(!row){const tr=el('tr'),label=el('td','',f.label),value=el('td'),age=el('td');tr.append(label,value,age);c.table.append(tr);row={value,age};c.rows.set(f.label,row)}row.value.textContent=f.value;row.value.className=f.changed&&active&&elapsed<2?'changed':'';row.age.textContent=`${Math.floor((f.age_s||0)+elapsed)} s`}
+ const fields=(s.fields||[]).filter(f=>!(c.key==='cardio'&&f.label==='Heart rate'));
+ fields.sort((a,b)=>fieldRank(c,a.label)-fieldRank(c,b.label));
+ const labels=new Set(fields.map(f=>f.label));for(const [label,row] of c.rows)if(!labels.has(label)){row.value.parentElement.remove();c.rows.delete(label)}
+ for(const f of fields){let row=c.rows.get(f.label);if(!row){const tr=el('tr'),label=el('td','',f.label),value=el('td'),age=el('td');tr.append(label,value,age);row={value,age};c.rows.set(f.label,row)}row.value.textContent=f.value;row.value.className=f.changed&&active&&elapsed<2?'changed':'';row.age.textContent=`${Math.floor((f.age_s||0)+elapsed)} s`;c.table.append(row.value.parentElement)}
  c.card.classList.toggle('stale',!active||(s.packet_age_s!=null&&s.packet_age_s+elapsed>10))}
 function draw(){const elapsed=(performance.now()-lastAt)/1000,active=online&&last&&last.state==='running'&&elapsed<4;
  const badge=document.querySelector('#connection');badge.textContent=active?'● Live':online?'Collector inactive':'Disconnected';badge.className='pill '+(active?'ok':'warn');
@@ -58,5 +49,3 @@ function draw(){const elapsed=(performance.now()-lastAt)/1000,active=online&&las
 }
 async function poll(){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),3000);try{const response=await fetch('/api/state',{cache:'no-store',signal:controller.signal});if(!response.ok)throw new Error(response.status);last=await response.json();lastAt=performance.now();online=true}catch(e){online=false}finally{clearTimeout(timer);draw();setTimeout(poll,500)}}
 poll();setInterval(()=>{if(last)draw()},1000);
-</script>
-</html>
