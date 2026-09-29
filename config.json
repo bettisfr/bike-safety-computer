@@ -2,6 +2,8 @@
     "devices": {
         "cardio": {
             "name": "COOSPO H808S",
+            "kind": "heart_rate",
+            "visible_fields": ["Battery"],
             "ble": {
                 "address": "D5:C5:6C:0E:23:41"
             },
@@ -11,6 +13,8 @@
         },
         "speedcadence": {
             "name": "DuoTrap S",
+            "kind": "speed_cadence",
+            "visible_fields": ["Battery"],
             "ble": {
                 "address": "CA:E3:18:C1:45:76"
             },
@@ -21,6 +25,8 @@
         },
         "frontlight": {
             "name": "Ion Pro RT",
+            "kind": "light",
+            "visible_fields": ["Mode", "Intensity", "Battery status"],
             "ble": {
                 "address": "D9:80:3C:1F:06:45"
             },
@@ -30,6 +36,8 @@
         },
         "rearlight": {
             "name": "Flare RT",
+            "kind": "light",
+            "visible_fields": ["Mode", "Intensity", "Battery status"],
             "ble": {
                 "address": "CC:7E:7A:54:2C:D9"
             },
@@ -39,6 +47,13 @@
         },
         "drivetrain": {
             "name": "SRAM Force AXS",
+            "kind": "drivetrain",
+            "visible_fields": [
+                "Battery · Front derailleur",
+                "Battery · Rear derailleur",
+                "Battery · Left shifter",
+                "Battery · Right shifter"
+            ],
             "ble": {
                 "address": "D7:86:54:78:31:79"
             },

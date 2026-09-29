@@ -1,49 +1,171 @@
-const keys=['cardio','speedcadence','frontlight','rearlight','drivetrain'];
-const names={cardio:'Heart rate',speedcadence:'Speed and cadence',frontlight:'Front light',rearlight:'Rear light',drivetrain:'Drivetrain'};
-const cards={};
-const sramBatteryOrder=['front derailleur','rear derailleur','left shifter','right shifter'];
-function fieldRank(card,label){
- const lower=label.toLowerCase();
- if(!lower.includes('battery'))return 0;
- if(card.key!=='drivetrain')return 100;
- const component=sramBatteryOrder.findIndex(name=>lower.includes(name));
- return component<0?105:101+component;
+const cards = new Map();
+const cardContainer = document.querySelector('#ant-cards');
+
+let last = null;
+let lastAt = 0;
+let online = false;
+
+function element(tag, className, value) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (value !== undefined) node.textContent = value;
+    return node;
 }
-function el(tag,cls,value){const n=document.createElement(tag);if(cls)n.className=cls;if(value!==undefined)n.textContent=value;return n}
-for(const key of keys){const card=el('section','sensor'),head=el('div','sensor-head'),title=el('h3','',names[key]),metrics=el('span','metrics'),signal=el('span','signal');head.append(title,metrics);const status=el('div','status','Waiting…'),table=el('table','fields'),error=el('div','error');card.append(head,status,signal,table,error);document.querySelector('#ant-cards').append(card);cards[key]={card,key,title,metrics,signal,status,table,error,rows:new Map()}}
-let last=null,lastAt=0,online=false;
-const fmt=v=>v==null?'—':v.toFixed(1);
-function renderSection(c,s,elapsed,active){if(!s)return;c.title.textContent=s.name||names[c.key];c.status.textContent=s.status||'Waiting…';c.error.textContent=s.error||'';
- const heartRate=s.fields?.find(f=>f.label==='Heart rate');
- if(c.key==='cardio'){
-  const strength=s.rssi==null?'RSSI unavailable':`${s.rssi} dBm`;
-  const age=heartRate?`${Math.floor(heartRate.age_s+elapsed)} s ago`:'—';
-  c.signal.textContent=`${strength} · HR reading ${age}`;
- }else if(c.key==='speedcadence'){
-  const strength=s.rssi==null?'RSSI unavailable':`${s.rssi} dBm`;
-  const reading=s.fields?.find(f=>f.label==='Wheel · cumulative revolutions'||f.label==='Crank · cumulative revolutions');
-  const age=reading?`${Math.floor(reading.age_s+elapsed)} s ago`:'—';
-  c.signal.textContent=`${strength} · reading ${age}`;
- }else if(s.packet_age_s!=null){
-  c.signal.textContent=`RSSI unavailable · reading ${Math.floor(s.packet_age_s+elapsed)} s ago`;
- }else c.signal.textContent=s.rssi==null?'':`${s.rssi} dBm · advertisement ${Math.floor((s.advertisement_age_s||0)+elapsed)} s ago`;
- const fields=(s.fields||[]).filter(f=>!(c.key==='cardio'&&f.label==='Heart rate'));
- fields.sort((a,b)=>fieldRank(c,a.label)-fieldRank(c,b.label));
- const labels=new Set(fields.map(f=>f.label));for(const [label,row] of c.rows)if(!labels.has(label)){row.value.parentElement.remove();c.rows.delete(label)}
- for(const f of fields){let row=c.rows.get(f.label);if(!row){const tr=el('tr'),label=el('td','',f.label),value=el('td'),age=el('td');tr.append(label,value,age);row={value,age};c.rows.set(f.label,row)}row.value.textContent=f.value;row.value.className=f.changed&&active&&elapsed<2?'changed':'';row.age.textContent=f.age_s==null?'—':`${f.saved?'saved · ':''}${Math.floor(f.age_s+elapsed)} s`;c.table.append(row.value.parentElement)}
- c.card.classList.toggle('stale',!active||(s.packet_age_s!=null&&s.packet_age_s+elapsed>10))}
-function draw(){const elapsed=(performance.now()-lastAt)/1000,active=online&&elapsed<4;
- const badge=document.querySelector('#connection');badge.textContent=active?'● Live':'Disconnected';badge.className='pill '+(active?'ok':'warn');
- const banner=document.querySelector('#banner'),error=!online?'Connection to Raspberry lost. Reconnecting…':'';banner.textContent=error;banner.style.display=error?'block':'none';
- const ant=last?.sections_ant||{};
- for(const key of keys)renderSection(cards[key],ant[key],elapsed,active);
- const bpm=(sections)=>{const s=sections.cardio,f=s?.fields?.find(f=>f.label==='Heart rate');return s?.status==='connected'&&f&&f.age_s+elapsed<10?f.value.replace(/\s*bpm$/,''):'—'};
- cards.cardio.metrics.textContent=`${active?bpm(ant):'—'} bpm`;
- cards.speedcadence.metrics.textContent=`${active?fmt(ant.speedcadence?.speed_kmh):'—'} km/h · ${active?fmt(ant.speedcadence?.cadence_rpm):'—'} rpm`;
- const shift=ant.drivetrain?.fields?.find(f=>f.label==='Gear');
- cards.drivetrain.metrics.textContent=active&&shift&&shift.age_s+elapsed<10?shift.value:'—';
- document.querySelector('#recording').textContent=last?.log?`${active?'Recording':'Last log'}: ${last.log}`:'Waiting for collection…';
- if(last?.wheel_circumference_m)document.querySelector('#wheel').textContent=`Wheel circumference: ${last.wheel_circumference_m.toFixed(3)} m`;
+
+function createCard(device) {
+    const card = element('section', 'sensor');
+    const heading = element('div', 'sensor-head');
+    const title = element('h3', '', device.name);
+    const metrics = element('span', 'metrics');
+    const signal = element('div', 'signal');
+    const status = element('div', 'status', 'Waiting…');
+    const table = element('table', 'fields');
+    const error = element('div', 'error');
+
+    heading.append(title, metrics);
+    card.append(heading, status, signal, table, error);
+    return {
+        card, title, metrics, signal, status, table, error,
+        kind: device.kind,
+        visibleFields: device.visible_fields,
+        rows: new Map(),
+    };
 }
-async function poll(){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),3000);try{const response=await fetch('/api/state',{cache:'no-store',signal:controller.signal});if(!response.ok)throw new Error(response.status);last=await response.json();lastAt=performance.now();online=true}catch(e){online=false}finally{clearTimeout(timer);draw();setTimeout(poll,500)}}
-poll();setInterval(()=>{if(last)draw()},1000);
+
+function syncCards(devices) {
+    const visible = new Set();
+
+    devices.forEach((device, index) => {
+        visible.add(device.key);
+        let card = cards.get(device.key);
+        if (!card) {
+            card = createCard(device);
+            cards.set(device.key, card);
+        }
+        card.kind = device.kind;
+        card.visibleFields = device.visible_fields;
+        card.title.textContent = device.name;
+
+        if (cardContainer.children[index] !== card.card) {
+            cardContainer.insertBefore(card.card, cardContainer.children[index] || null);
+        }
+    });
+
+    for (const [key, card] of cards) {
+        if (!visible.has(key)) {
+            card.card.remove();
+            cards.delete(key);
+        }
+    }
+}
+
+function renderSection(card, section, elapsed, active) {
+    if (!section) return;
+
+    card.status.textContent = section.status || 'Waiting…';
+    card.error.textContent = section.error || '';
+    card.signal.textContent = section.packet_age_s == null
+        ? ''
+        : `Updated ${Math.floor(section.packet_age_s + elapsed)} s ago`;
+
+    const fields = (section.fields || [])
+        .filter(field => card.visibleFields.includes(field.label))
+        .sort((a, b) => card.visibleFields.indexOf(a.label) - card.visibleFields.indexOf(b.label));
+    const labels = new Set(fields.map(field => field.label));
+
+    for (const [label, row] of card.rows) {
+        if (!labels.has(label)) {
+            row.value.parentElement.remove();
+            card.rows.delete(label);
+        }
+    }
+
+    for (const field of fields) {
+        let row = card.rows.get(field.label);
+        if (!row) {
+            const tableRow = element('tr');
+            const label = element('td', '', field.label);
+            const value = element('td');
+            const age = element('td');
+            tableRow.append(label, value, age);
+            row = { value, age };
+            card.rows.set(field.label, row);
+        }
+        row.value.textContent = field.value;
+        row.value.className = field.changed && active && elapsed < 2 ? 'changed' : '';
+        row.age.textContent = field.age_s == null
+            ? '—'
+            : `${field.saved ? 'saved · ' : ''}${Math.floor(field.age_s + elapsed)} s`;
+        card.table.append(row.value.parentElement);
+    }
+
+    card.card.classList.toggle(
+        'stale', !active || (section.packet_age_s != null && section.packet_age_s + elapsed > 10),
+    );
+}
+
+function formatNumber(value) {
+    return value == null ? '—' : value.toFixed(1);
+}
+
+function renderMetric(card, section, elapsed, active) {
+    if (card.kind === 'heart_rate') {
+        const rate = section?.fields?.find(field => field.label === 'Heart rate');
+        const value = active && section?.status === 'connected' && rate && rate.age_s + elapsed < 10
+            ? rate.value.replace(/\s*bpm$/, '')
+            : '—';
+        card.metrics.textContent = `${value} bpm`;
+    } else if (card.kind === 'speed_cadence') {
+        const speed = active ? formatNumber(section?.speed_kmh) : '—';
+        const cadence = active ? formatNumber(section?.cadence_rpm) : '—';
+        card.metrics.textContent = `${speed}\u00a0km/h · ${cadence}\u00a0rpm`;
+    } else if (card.kind === 'drivetrain') {
+        const gear = section?.fields?.find(field => field.label === 'Gear');
+        card.metrics.textContent = active && gear && gear.age_s + elapsed < 10 ? gear.value : '—';
+    } else {
+        card.metrics.textContent = '';
+    }
+}
+
+function draw() {
+    const elapsed = (performance.now() - lastAt) / 1000;
+    const active = online && elapsed < 4;
+    const badge = document.querySelector('#connection');
+    badge.textContent = active ? '● Live' : 'Disconnected';
+    badge.className = `pill ${active ? 'ok' : 'warn'}`;
+
+    const banner = document.querySelector('#banner');
+    banner.textContent = online ? '' : 'Connection to Raspberry lost. Reconnecting…';
+    banner.style.display = banner.textContent ? 'block' : 'none';
+
+    const devices = last?.devices || [];
+    const sections = last?.sections_ant || {};
+    syncCards(devices);
+    for (const device of devices) {
+        const card = cards.get(device.key);
+        const section = sections[device.key];
+        renderSection(card, section, elapsed, active);
+        renderMetric(card, section, elapsed, active);
+    }
+}
+
+async function poll() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    try {
+        const response = await fetch('/api/state', { cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw new Error(response.status);
+        last = await response.json();
+        lastAt = performance.now();
+        online = true;
+    } catch (error) {
+        online = false;
+    } finally {
+        clearTimeout(timer);
+        draw();
+        setTimeout(poll, 500);
+    }
+}
+
+poll();
+setInterval(() => { if (last) draw(); }, 1000);

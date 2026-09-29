@@ -29,7 +29,8 @@ identifier is known; this is useful for components that transmit separately.
 The web page displays ANT+ readings. The collector also keeps BLE readings
 available through the API and terminal dashboard. Only fields received from a
 device are shown. ANT+ battery categories or voltage are not converted into
-percentages.
+percentages. The page builds its device sections from the catalog in
+`config.json` returned by the API.
 
 ## Raspberry Pi
 

@@ -15,7 +15,7 @@ from werkzeug.serving import make_server
 
 from telemetry.ble_sensors import BikeTelemetry, TelemetryConfig
 from telemetry.ant_sensors import ANTSensorCollector
-from telemetry.config import WHEEL_CIRCUMFERENCE_M
+from telemetry.config import DEVICES, WHEEL_CIRCUMFERENCE_M
 
 ROOT = Path(__file__).resolve().parent
 
@@ -23,6 +23,9 @@ ROOT = Path(__file__).resolve().parent
 class Collector:
     def __init__(self, config):
         self.config = config
+        self.device_catalog = [{"key": key, "name": device["name"], "kind": device["kind"],
+                                "visible_fields": device["visible_fields"]}
+                               for key, device in DEVICES.items()]
         self.mutex = threading.Lock()
         self.state = {"state": "starting", "sections": {}, "error": None}
         self.loop = None
@@ -34,6 +37,7 @@ class Collector:
     def snapshot(self):
         with self.mutex:
             state = dict(self.state)
+        state["devices"] = self.device_catalog
         state["sections_ant"] = self.ant.snapshot()
         return state
 
