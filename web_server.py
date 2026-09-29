@@ -13,8 +13,9 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template
 from werkzeug.serving import make_server
 
-from ble_sensors import BikeTelemetry, TelemetryConfig
-from ant_sensors import ANTSensorCollector
+from telemetry.ble_sensors import BikeTelemetry, TelemetryConfig
+from telemetry.ant_sensors import ANTSensorCollector
+from telemetry.config import WHEEL_CIRCUMFERENCE_M
 
 ROOT = Path(__file__).resolve().parent
 
@@ -56,11 +57,11 @@ class Collector:
                                for label, (value, updated) in section.visible_fields().items()],
                 }
             fresh = (app.duo_packet_at is not None and now - app.duo_packet_at < 10
-                     and app.sections["duo"].status == "connected")
+                     and app.sections["speedcadence"].status == "connected")
             wheel = app.wheel.display_rate() if fresh else None
             crank = app.crank.display_rate() if fresh else None
-            sections["duo"]["speed_kmh"] = wheel * self.config.wheel_circumference * 3.6 if wheel is not None else None
-            sections["duo"]["cadence_rpm"] = crank * 60 if crank is not None else None
+            sections["speedcadence"]["speed_kmh"] = wheel * self.config.wheel_circumference * 3.6 if wheel is not None else None
+            sections["speedcadence"]["cadence_rpm"] = crank * 60 if crank is not None else None
             self.publish({"state": "running", "error": None, "timestamp": time.time(),
                           "log": getattr(app, "log_path", Path("opening")).name,
                           "wheel_circumference_m": self.config.wheel_circumference,
@@ -103,7 +104,7 @@ class Collector:
 
 
 def create_app(collector):
-    app = Flask(__name__)
+    app = Flask(__name__, template_folder="www/templates", static_folder="www/static")
 
     @app.get("/")
     def index():
@@ -126,7 +127,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5050)
-    parser.add_argument("--wheel-circumference", type=float, default=2.136)
+    parser.add_argument("--wheel-circumference", type=float, default=WHEEL_CIRCUMFERENCE_M)
     parser.add_argument("--poll-interval", type=float, default=10)
     parser.add_argument("--sram-interval", type=float, default=0.5)
     parser.add_argument("--log", type=Path)

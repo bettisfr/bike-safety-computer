@@ -7,15 +7,14 @@ if (($#)); then shift; fi
 SERVICE=bike-telemetry.service
 case "$ACTION" in
   deploy)
-    ssh "$HOST" 'mkdir -p "$HOME/bike-safety-computer/templates" "$HOME/bike-safety-computer/static"'
+    ssh "$HOST" 'mkdir -p "$HOME/bike-safety-computer/telemetry" "$HOME/bike-safety-computer/www/templates" "$HOME/bike-safety-computer/www/static"'
     rsync -a --itemize-changes -- \
-      "$ROOT/web_server.py" "$ROOT/dashboard.py" \
-      "$ROOT/ble_sensors.py" "$ROOT/ant_sensors.py" "$ROOT/README.md" \
-      "$ROOT/drivetrain.json" "$ROOT/requirements.txt" \
+      "$ROOT/web_server.py" "$ROOT/README.md" \
+      "$ROOT/config.json" "$ROOT/requirements.txt" \
       "$ROOT/scripts/install-rpi.sh" "$ROOT/scripts/42-ant-usb-sticks.rules" \
       "$ROOT/scripts/blacklist-ant-serial.conf" "$HOST:bike-safety-computer/"
-    rsync -a --itemize-changes -- "$ROOT/templates/" "$HOST:bike-safety-computer/templates/"
-    rsync -a --itemize-changes -- "$ROOT/static/" "$HOST:bike-safety-computer/static/"
+    rsync -a --delete --exclude='__pycache__/' --itemize-changes -- "$ROOT/telemetry/" "$HOST:bike-safety-computer/telemetry/"
+    rsync -a --delete --itemize-changes -- "$ROOT/www/" "$HOST:bike-safety-computer/www/"
     ssh "$HOST" 'bash "$HOME/bike-safety-computer/install-rpi.sh"'
     ;;
   start|stop|restart|status)
@@ -38,12 +37,12 @@ case "$ACTION" in
   dashboard|run)
     REMOTE=""
     if (($#)); then printf -v REMOTE '%q ' "$@"; fi
-    ssh -t "$HOST" "exec \"\$HOME/pyenv/bin/python\" \"\$HOME/bike-safety-computer/dashboard.py\" $REMOTE"
+    ssh -t "$HOST" "cd \"\$HOME/bike-safety-computer\" && exec \"\$HOME/pyenv/bin/python\" -m telemetry.dashboard $REMOTE"
     ;;
   lights)
     REMOTE=""
     if (($#)); then printf -v REMOTE '%q ' "$@"; else REMOTE=status; fi
-    ssh "$HOST" "exec \"\$HOME/pyenv/bin/python\" \"\$HOME/bike-safety-computer/ble_sensors.py\" $ACTION $REMOTE"
+    ssh "$HOST" "cd \"\$HOME/bike-safety-computer\" && exec \"\$HOME/pyenv/bin/python\" -m telemetry.ble_sensors $ACTION $REMOTE"
     ;;
   fetch)
     mkdir -p "$ROOT/data/rpi"
@@ -51,7 +50,7 @@ case "$ACTION" in
     ;;
   *)
     echo 'Usage: scripts/rpi.sh {deploy|web|dashboard [--raw]|run|start|stop|restart|status|logs|enable|disable|fetch|lights [status|on|off|flash] [--light front|rear|both]}'
-    echo 'Dashboard: scripts/rpi.sh dashboard [--raw] [--wheel-circumference 2.136]'
+    echo 'Dashboard: scripts/rpi.sh dashboard [--raw] [--wheel-circumference METERS]'
     echo 'Host override: RPI_HOST=user@hostname scripts/rpi.sh deploy'
     [[ "$ACTION" == help ]]
     ;;

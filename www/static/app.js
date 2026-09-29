@@ -1,25 +1,25 @@
-const keys=['cardio','duo','front','rear','sram'];
-const names={cardio:'COOSPO H808S',duo:'DuoTrap S',front:'Ion Pro RT · front',rear:'Flare RT · rear',sram:'SRAM Force AXS · 2×12'};
+const keys=['cardio','speedcadence','frontlight','rearlight','drivetrain'];
+const names={cardio:'Heart rate',speedcadence:'Speed and cadence',frontlight:'Front light',rearlight:'Rear light',drivetrain:'Drivetrain'};
 const cards={};
 const sramBatteryOrder=['front derailleur','rear derailleur','left shifter','right shifter'];
 function fieldRank(card,label){
  const lower=label.toLowerCase();
  if(!lower.includes('battery'))return 0;
- if(card.key!=='sram')return 100;
+ if(card.key!=='drivetrain')return 100;
  const component=sramBatteryOrder.findIndex(name=>lower.includes(name));
  return component<0?105:101+component;
 }
 function el(tag,cls,value){const n=document.createElement(tag);if(cls)n.className=cls;if(value!==undefined)n.textContent=value;return n}
-for(const key of keys){const card=el('section','sensor'),head=el('div','sensor-head'),title=el('h3','',names[key]),metrics=el('span','metrics'),signal=el('span','signal');head.append(title,metrics);const status=el('div','status','Waiting…'),table=el('table','fields'),error=el('div','error');card.append(head,status,signal,table,error);document.querySelector('#ant-cards').append(card);cards[key]={card,key,metrics,signal,status,table,error,rows:new Map()}}
+for(const key of keys){const card=el('section','sensor'),head=el('div','sensor-head'),title=el('h3','',names[key]),metrics=el('span','metrics'),signal=el('span','signal');head.append(title,metrics);const status=el('div','status','Waiting…'),table=el('table','fields'),error=el('div','error');card.append(head,status,signal,table,error);document.querySelector('#ant-cards').append(card);cards[key]={card,key,title,metrics,signal,status,table,error,rows:new Map()}}
 let last=null,lastAt=0,online=false;
 const fmt=v=>v==null?'—':v.toFixed(1);
-function renderSection(c,s,elapsed,active){if(!s)return;c.status.textContent=s.status||'Waiting…';c.error.textContent=s.error||'';
+function renderSection(c,s,elapsed,active){if(!s)return;c.title.textContent=s.name||names[c.key];c.status.textContent=s.status||'Waiting…';c.error.textContent=s.error||'';
  const heartRate=s.fields?.find(f=>f.label==='Heart rate');
  if(c.key==='cardio'){
   const strength=s.rssi==null?'RSSI unavailable':`${s.rssi} dBm`;
   const age=heartRate?`${Math.floor(heartRate.age_s+elapsed)} s ago`:'—';
   c.signal.textContent=`${strength} · HR reading ${age}`;
- }else if(c.key==='duo'){
+ }else if(c.key==='speedcadence'){
   const strength=s.rssi==null?'RSSI unavailable':`${s.rssi} dBm`;
   const reading=s.fields?.find(f=>f.label==='Wheel · cumulative revolutions'||f.label==='Crank · cumulative revolutions');
   const age=reading?`${Math.floor(reading.age_s+elapsed)} s ago`:'—';
@@ -39,9 +39,9 @@ function draw(){const elapsed=(performance.now()-lastAt)/1000,active=online&&ela
  for(const key of keys)renderSection(cards[key],ant[key],elapsed,active);
  const bpm=(sections)=>{const s=sections.cardio,f=s?.fields?.find(f=>f.label==='Heart rate');return s?.status==='connected'&&f&&f.age_s+elapsed<10?f.value.replace(/\s*bpm$/,''):'—'};
  cards.cardio.metrics.textContent=`${active?bpm(ant):'—'} bpm`;
- cards.duo.metrics.textContent=`${active?fmt(ant.duo?.speed_kmh):'—'} km/h · ${active?fmt(ant.duo?.cadence_rpm):'—'} rpm`;
- const shift=ant.sram?.fields?.find(f=>f.label==='Gear');
- cards.sram.metrics.textContent=active&&shift&&shift.age_s+elapsed<10?shift.value:'—';
+ cards.speedcadence.metrics.textContent=`${active?fmt(ant.speedcadence?.speed_kmh):'—'} km/h · ${active?fmt(ant.speedcadence?.cadence_rpm):'—'} rpm`;
+ const shift=ant.drivetrain?.fields?.find(f=>f.label==='Gear');
+ cards.drivetrain.metrics.textContent=active&&shift&&shift.age_s+elapsed<10?shift.value:'—';
  document.querySelector('#recording').textContent=last?.log?`${active?'Recording':'Last log'}: ${last.log}`:'Waiting for collection…';
  if(last?.wheel_circumference_m)document.querySelector('#wheel').textContent=`Wheel circumference: ${last.wheel_circumference_m.toFixed(3)} m`;
 }

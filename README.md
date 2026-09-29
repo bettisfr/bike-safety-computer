@@ -11,15 +11,20 @@ and power meters are possible future additions.
 
 ## Project layout
 
-- [ble_sensors.py](ble_sensors.py) collects BLE readings and provides explicit
+- [telemetry/ble_sensors.py](telemetry/ble_sensors.py) collects BLE readings and provides explicit
   light commands.
-- [ant_sensors.py](ant_sensors.py) collects ANT+ readings from the USB stick.
+- [telemetry/ant_sensors.py](telemetry/ant_sensors.py) collects ANT+ readings from the USB stick.
 - [web_server.py](web_server.py) serves a shared telemetry API and web page.
-- [templates/index.html](templates/index.html) is the page; [static/style.css](static/style.css)
-  and [static/app.js](static/app.js) provide its styling and live updates.
-- [dashboard.py](dashboard.py) is the terminal dashboard.
-- [drivetrain.json](drivetrain.json) holds the bike-specific drivetrain setup.
+- [www/templates/index.html](www/templates/index.html) is the page;
+  [www/static/style.css](www/static/style.css) and
+  [www/static/app.js](www/static/app.js) provide its styling and live updates.
+- [telemetry/dashboard.py](telemetry/dashboard.py) is the terminal dashboard.
+- [config.json](config.json) holds the devices, their BLE/ANT+ identifiers,
+  wheel circumference, and SRAM drivetrain setup.
 - [scripts/rpi.sh](scripts/rpi.sh) deploys and manages the Raspberry Pi service.
+
+An ANT+ `device_id` set to `null` accepts devices of that profile until their
+identifier is known; this is useful for components that transmit separately.
 
 The web page displays ANT+ readings. The collector also keeps BLE readings
 available through the API and terminal dashboard. Only fields received from a

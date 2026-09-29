@@ -1,0 +1,77 @@
+{
+    "devices": {
+        "cardio": {
+            "name": "COOSPO H808S",
+            "ble": {
+                "address": "D5:C5:6C:0E:23:41"
+            },
+            "ant": {
+                "device_id": 3622
+            }
+        },
+        "speedcadence": {
+            "name": "DuoTrap S",
+            "ble": {
+                "address": "CA:E3:18:C1:45:76"
+            },
+            "ant": {
+                "device_id": 769
+            },
+            "wheel_circumference_m": 2.136
+        },
+        "frontlight": {
+            "name": "Ion Pro RT",
+            "ble": {
+                "address": "D9:80:3C:1F:06:45"
+            },
+            "ant": {
+                "device_id": 42925
+            }
+        },
+        "rearlight": {
+            "name": "Flare RT",
+            "ble": {
+                "address": "CC:7E:7A:54:2C:D9"
+            },
+            "ant": {
+                "device_id": 42925
+            }
+        },
+        "drivetrain": {
+            "name": "SRAM Force AXS",
+            "ble": {
+                "address": "D7:86:54:78:31:79"
+            },
+            "ant": {
+                "device_id": null
+            },
+            "gearing": {
+                "cassette_teeth_smallest_to_largest": [
+                    10,
+                    11,
+                    12,
+                    13,
+                    14,
+                    15,
+                    17,
+                    19,
+                    21,
+                    24,
+                    28,
+                    33
+                ],
+                "chainring_teeth_smallest_to_largest": [
+                    35,
+                    48
+                ],
+                "ant_position_mapping": {
+                    "rear_index_zero_is_largest": true,
+                    "front_index_to_teeth": {
+                        "0": 35,
+                        "1": 48
+                    }
+                }
+            }
+        }
+    }
+}

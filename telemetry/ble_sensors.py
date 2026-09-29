@@ -10,27 +10,22 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from bleak import BleakClient, BleakScanner
+from .config import DEVICES, WHEEL_CIRCUMFERENCE_M
 
 LOG = logging.getLogger("bike.telemetry")
 
 MODE = "71261001-3692-ae93-e711-472ba41689c9"
-LIGHTS = {"front": "Ion Pro RT", "rear": "Flare RT"}
+LIGHTS = {"front": DEVICES["frontlight"]["name"],
+          "rear": DEVICES["rearlight"]["name"]}
 
 BATTERY = "00002a19-0000-1000-8000-00805f9b34fb"
 CSC = "00002a5b-0000-1000-8000-00805f9b34fb"
 BASE = "-90aa-4c7c-b036-1e01fb8eb7ee"
-DEVICES = {
-    "cardio": ("CARDIO · COOSPO H808S", "D5:C5:6C:0E:23:41"),
-    "duo": ("DUOTRAP S · wheel and crank", "CA:E3:18:C1:45:76"),
-    "front": ("FRONT LIGHT · Ion Pro RT", "D9:80:3C:1F:06:45"),
-    "rear": ("REAR LIGHT · Flare RT", "CC:7E:7A:54:2C:D9"),
-    "sram": ("SRAM FORCE AXS · 2x12", "D7:86:54:78:31:79"),
-}
 HR_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
 
 @dataclass
 class TelemetryConfig:
-    wheel_circumference: float = 2.136
+    wheel_circumference: float = WHEEL_CIRCUMFERENCE_M
     poll_interval: float = 10
     sram_interval: float = 0.5
     raw: bool = False
@@ -145,7 +140,8 @@ class BikeTelemetry:
         args = args or TelemetryConfig()
         self.on_event = on_event
         self.args = args
-        self.sections = {key: Section(*value) for key, value in DEVICES.items()}
+        self.sections = {key: Section(device["name"], device["ble"]["address"].upper())
+                         for key, device in DEVICES.items()}
         self.devices = {}
         self.light_modes = {}
         self.light_descriptors = set()
@@ -239,7 +235,7 @@ class BikeTelemetry:
             device = await BleakScanner.find_device_by_filter(matches, timeout=6)
             if device is None or self.stop.is_set():
                 self.devices.pop(key, None)
-                if key in ("cardio", "duo", "front", "rear") and not self.stop.is_set() and await self.release_stale_connection(key):
+                if key in ("cardio", "speedcadence", "frontlight", "rearlight") and not self.stop.is_set() and await self.release_stale_connection(key):
                     section.status = "releasing stale BlueZ connection"
                 return None
             client = BleakClient(device, timeout=90)
@@ -279,7 +275,7 @@ class BikeTelemetry:
                     await self.pause(2)
                     continue
                 await self.battery(key, client)
-                if key == "duo":
+                if key == "speedcadence":
                     self.wheel, self.crank = Rotation(32), Rotation(16)
                     self.duo_packet_at = None
                 last_packet = time.monotonic()
@@ -306,7 +302,7 @@ class BikeTelemetry:
                             self.duo_packet_at = time.monotonic()
                         if self.args.raw:
                             display["BLE packet"] = raw.hex()
-                        if key == "duo":
+                        if key == "speedcadence":
                             wheel, crank = self.wheel.display_rate(), self.crank.display_rate()
                             values.update(speed_kmh=wheel * self.args.wheel_circumference * 3.6 if wheel is not None else None,
                                           cadence_rpm=crank * 60 if crank is not None else None,
@@ -370,7 +366,10 @@ class BikeTelemetry:
         raw = await self.read(client, "d9050003" + BASE)
         records = extract_sram(raw)
         labels = {0: "Left shifter", 1: "Right shifter", 128: "Front derailleur", 129: "Rear derailleur"}
-        values = {"Gear": "unavailable via BLE", "Drivetrain": "35/48 · 10-11-12-13-14-15-17-19-21-24-28-33"}
+        drivetrain = DEVICES["drivetrain"]["gearing"]
+        values = {"Gear": "unavailable via BLE",
+                  "Drivetrain": ("/".join(map(str, drivetrain["chainring_teeth_smallest_to_largest"]))
+                                 + " · " + "-".join(map(str, drivetrain["cassette_teeth_smallest_to_largest"])))}
         for label in labels.values():
             values[label + " · battery*"] = "unavailable"
             values[label + " · serial / status"] = "unavailable"
@@ -388,15 +387,15 @@ class BikeTelemetry:
         values["* Interpretation"] = "Voltage and time counter experimental; left/right order from SDK"
         if self.args.raw:
             values["Dynamic BLE record"] = raw.hex()
-        self.record("sram", values, data={"records": records, "gear": None}, raw=raw)
+        self.record("drivetrain", values, data={"records": records, "gear": None}, raw=raw)
 
     async def poll_sram(self):
         """Keep SRAM connected; light discovery never gates an established read."""
-        section = self.sections["sram"]
+        section = self.sections["drivetrain"]
         while not self.stop.is_set():
             client = None
             try:
-                client = await self.connect("sram")
+                client = await self.connect("drivetrain")
                 if client is None:
                     section.status = "searching · wake the derailleur"
                 else:
@@ -427,7 +426,7 @@ class BikeTelemetry:
     async def poll_others(self):
         # One light at a time, alongside persistent HR, CSC and SRAM connections.
         while not self.stop.is_set():
-            for key in ("front", "rear"):
+            for key in ("frontlight", "rearlight"):
                 if self.stop.is_set():
                     break
                 client = None
@@ -452,7 +451,7 @@ class BikeTelemetry:
         Every run records JSONL, including numeric data and raw measurement bytes.
         Callbacks must be fast and must not block the asyncio event loop.
         """
-        path = self.args.log or Path(__file__).resolve().parent / "data" / (
+        path = self.args.log or Path(__file__).resolve().parent.parent / "data" / (
             datetime.now(timezone.utc).strftime("telemetry-%Y%m%dT%H%M%S-%fZ.jsonl"))
         path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path = path
@@ -461,7 +460,7 @@ class BikeTelemetry:
         with path.open("a", buffering=1) as self.log:
             try:
                 tasks = [asyncio.create_task(self.stream("cardio")),
-                         asyncio.create_task(self.stream("duo")),
+                         asyncio.create_task(self.stream("speedcadence")),
                          asyncio.create_task(self.poll_sram()),
                          asyncio.create_task(self.poll_others()),
                          asyncio.create_task(self.stop.wait())]

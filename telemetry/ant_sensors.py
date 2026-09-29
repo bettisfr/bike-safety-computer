@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 from pathlib import Path
+from .config import DEVICES, WHEEL_CIRCUMFERENCE_M
 
 LOG = logging.getLogger("bike.ant")
 LIGHT_BATTERY = {1: "Full", 2: "Good", 3: "OK", 4: "Low", 5: "Critical", 6: "Charging"}
@@ -51,9 +52,9 @@ class ANTRotation:
 
 
 class ANTSensorCollector:
-    def __init__(self, wheel_circumference=2.136):
+    def __init__(self, wheel_circumference=WHEEL_CIRCUMFERENCE_M):
         self.wheel_circumference = wheel_circumference
-        drivetrain = json.loads(Path(__file__).with_name("drivetrain.json").read_text())
+        drivetrain = DEVICES["drivetrain"]["gearing"]
         mapping = drivetrain.get("ant_position_mapping") or {}
         self.front_teeth = {int(index): teeth for index, teeth in
                             mapping.get("front_index_to_teeth", {}).items()}
@@ -62,19 +63,10 @@ class ANTSensorCollector:
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.node = None
-        self.state = {
-            "cardio": {"name": "COOSPO H808S", "status": "initializing ANT+",
-                       "error": "", "rssi": None, "fields": []},
-            "duo": {"name": "DuoTrap S", "status": "initializing ANT+",
-                    "error": "", "rssi": None, "fields": []},
-            "front": {"name": "Ion Pro RT", "status": "initializing ANT+",
-                      "error": "", "rssi": None, "fields": []},
-            "rear": {"name": "Flare RT", "status": "initializing ANT+",
-                     "error": "", "rssi": None, "fields": []},
-            "sram": {"name": "SRAM Force AXS", "status": "initializing ANT+",
-                     "error": "", "rssi": None, "fields": []},
-        }
-        self.battery_cache_path = Path(__file__).with_name("data") / "ant_sram_batteries.json"
+        self.state = {key: {"name": device["name"], "status": "initializing ANT+",
+                            "error": "", "rssi": None, "fields": []}
+                      for key, device in DEVICES.items()}
+        self.battery_cache_path = Path(__file__).resolve().parent.parent / "data" / "ant_sram_batteries.json"
         self.battery_cache = self._load_sram_batteries()
         now = time.monotonic()
         wall_now = time.time()
@@ -88,7 +80,7 @@ class ANTSensorCollector:
             else:
                 updated, value = None, "Waiting for ANT+"
                 from_cache = False
-            self.state["sram"]["fields"].append({
+            self.state["drivetrain"]["fields"].append({
                 "label": label, "value": value, "updated": updated,
                 "changed_at": float("-inf"), "saved": from_cache,
             })
@@ -131,11 +123,11 @@ class ANTSensorCollector:
                                  "changed": now - field["changed_at"] < 2}
                                 for field in section["fields"]]}
                       for key, section in self.state.items()}
-            fresh = self.received_at["duo"] is not None and now - self.received_at["duo"] < 10
+            fresh = self.received_at["speedcadence"] is not None and now - self.received_at["speedcadence"] < 10
             wheel = self.wheel.display_rate(now) if fresh else None
             crank = self.crank.display_rate(now) if fresh else None
-            result["duo"]["speed_kmh"] = wheel * self.wheel_circumference * 3.6 if wheel is not None else None
-            result["duo"]["cadence_rpm"] = crank * 60 if crank is not None else None
+            result["speedcadence"]["speed_kmh"] = wheel * self.wheel_circumference * 3.6 if wheel is not None else None
+            result["speedcadence"]["cadence_rpm"] = crank * 60 if crank is not None else None
             return result
 
     def _set_status(self, key, status, error=""):
@@ -185,7 +177,8 @@ class ANTSensorCollector:
                 duo = Scanner(node, device_type=DeviceType.BikeSpeedCadence.value, period=8086)
                 lights = Scanner(node, device_type=35, period=4084)
                 shifting = Scanner(node, device_type=34, period=8192)
-                selected = {"cardio": None, "duo": None}
+                selected = {key: DEVICES[key]["ant"]["device_id"]
+                            for key in ("cardio", "speedcadence", "frontlight", "rearlight")}
                 shifting_ids = set()
 
                 def cardio_packet(data):
@@ -208,9 +201,9 @@ class ANTSensorCollector:
                     if len(data) < 13 or data[11] != DeviceType.BikeSpeedCadence.value:
                         return
                     device_id = data[9] | data[10] << 8
-                    if selected["duo"] is None:
-                        selected["duo"] = device_id
-                    if device_id != selected["duo"]:
+                    if selected["speedcadence"] is None:
+                        selected["speedcadence"] = device_id
+                    if device_id != selected["speedcadence"]:
                         return
                     crank_time = int.from_bytes(data[0:2], "little")
                     crank_count = int.from_bytes(data[2:4], "little")
@@ -220,7 +213,7 @@ class ANTSensorCollector:
                     with self.lock:
                         self.crank.update(crank_count, crank_time, now)
                         self.wheel.update(wheel_count, wheel_time, now)
-                        self._record_locked("duo", {
+                        self._record_locked("speedcadence", {
                             "ANT+ ID": device_id,
                             "Wheel · cumulative revolutions": wheel_count,
                             "Wheel · event time": f"{wheel_time} /1024 s (modulo 64 s)",
@@ -233,7 +226,7 @@ class ANTSensorCollector:
                     if len(data) < 13 or data[11] != 35 or data[0] != 1:
                         return
                     light_type = (data[2] >> 2) & 7
-                    key = {0: "front", 2: "rear"}.get(light_type)
+                    key = {0: "frontlight", 2: "rearlight"}.get(light_type)
                     if key is None:
                         return
                     device_id = data[9] | data[10] << 8
@@ -291,7 +284,7 @@ class ANTSensorCollector:
                             f"{voltage:.2f} V · {SHIFT_BATTERY.get(status, 'Unknown')}")
                     else:
                         return
-                    self._record("sram", values)
+                    self._record("drivetrain", values)
                     if data[0] == 82 and label in SRAM_BATTERY_LABELS:
                         self._save_sram_battery(label, values[label])
 
@@ -300,10 +293,10 @@ class ANTSensorCollector:
                 lights.channel.on_broadcast_data = light_packet
                 shifting.channel.on_broadcast_data = shifting_packet
                 self._set_status("cardio", "listening on ANT+ · wear the chest strap")
-                self._set_status("duo", "listening on ANT+ · spin the wheel and crank")
-                self._set_status("front", "listening on ANT+ · turn on the light")
-                self._set_status("rear", "listening on ANT+ · turn on the light")
-                self._set_status("sram", "listening on ANT+ · press a shift button")
+                self._set_status("speedcadence", "listening on ANT+ · spin the wheel and crank")
+                self._set_status("frontlight", "listening on ANT+ · turn on the light")
+                self._set_status("rearlight", "listening on ANT+ · turn on the light")
+                self._set_status("drivetrain", "listening on ANT+ · press a shift button")
                 node.start()
             except Exception as exc:
                 if not self.stop_event.is_set():

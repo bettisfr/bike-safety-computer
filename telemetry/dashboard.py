@@ -10,7 +10,8 @@ import signal
 import sys
 import time
 from pathlib import Path
-from ble_sensors import BikeTelemetry
+from .ble_sensors import BikeTelemetry
+from .config import WHEEL_CIRCUMFERENCE_M
 
 
 class Dashboard(BikeTelemetry):
@@ -23,7 +24,7 @@ class Dashboard(BikeTelemetry):
             lines.append(f"── {section.name} ── {section.status}")
             if section.rssi is not None:
                 lines.append(f"  Last advertisement: {section.rssi} dBm · {now - section.seen:.0f} s ago")
-            if key == "duo":
+            if key == "speedcadence":
                 fresh = self.duo_packet_at is not None and now - self.duo_packet_at < 10 and section.status == "connected"
                 wheel = self.wheel.display_rate() if fresh else None
                 crank = self.crank.display_rate() if fresh else None
@@ -117,8 +118,8 @@ async def run(app, screen, headless=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--wheel-circumference", type=float, default=2.136,
-                        help="Meters per wheel revolution; default 2.136 for assumed 700x28C")
+    parser.add_argument("--wheel-circumference", type=float, default=WHEEL_CIRCUMFERENCE_M,
+                        help="Meters per wheel revolution; default from config.json")
     parser.add_argument("--poll-interval", type=float, default=10, help="Pause between light polls, in seconds")
     parser.add_argument("--sram-interval", type=float, default=0.5, help="Pause between SRAM reads, in seconds")
     parser.add_argument("--raw", action="store_true", help="Show hexadecimal packets")
@@ -130,12 +131,12 @@ def main():
         parser.error("Wheel circumference must be 0.1–5 m; poll interval must be finite and at least 1 s")
     if not math.isfinite(args.sram_interval) or args.sram_interval < 0.1:
         parser.error("SRAM interval must be finite and at least 0.1 s")
-    with (Path(__file__).resolve().parent / ".telemetry.lock").open("a") as lock:
+    with (Path(__file__).resolve().parent.parent / ".telemetry.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             parser.exit(1, "Telemetry already running. Stop the other instance or bike-telemetry.service.\n")
-        diagnostic_dir = Path(__file__).resolve().parent / "data"
+        diagnostic_dir = Path(__file__).resolve().parent.parent / "data"
         diagnostic_dir.mkdir(parents=True, exist_ok=True)
         diagnostic_path = diagnostic_dir / datetime.now(timezone.utc).strftime("diagnostics-%Y%m%dT%H%M%S-%fZ.log")
         logging.basicConfig(filename=diagnostic_path, level=logging.INFO,

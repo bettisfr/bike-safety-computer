@@ -6,7 +6,7 @@ if [[ ! -x "$HOME/pyenv/bin/python" ]]; then
     python3 -m venv "$HOME/pyenv"
 fi
 "$HOME/pyenv/bin/python" -m pip install -r requirements.txt
-# Remove source modules replaced by ble_sensors.py and ant_sensors.py.
+# Remove obsolete standalone sensor modules from older deployments.
 rm -f "$APP/bike_telemetry.py" "$APP/ant_telemetry.py" "$APP/lights.py" \
       "$APP/sram.py" "$APP/sram_bond.py" "$APP/sram_batteries.py" "$APP/sram_records.py"
 if command -v udevadm >/dev/null && id -nG | grep -qw plugdev; then
@@ -41,4 +41,4 @@ UMask=0077
 WantedBy=default.target
 UNIT
 systemctl --user daemon-reload
-echo "Installed in $APP. Terminal: ~/pyenv/bin/python $APP/dashboard.py; background: systemctl --user start bike-telemetry"
+echo "Installed in $APP. Terminal: cd $APP && ~/pyenv/bin/python -m telemetry.dashboard; background: systemctl --user start bike-telemetry"
