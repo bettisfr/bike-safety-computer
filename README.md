@@ -11,7 +11,7 @@ and power meters are possible future additions.
 | Device | BLE | ANT+ |
 | --- | --- | --- |
 | COOSPO H808S | Heart rate, contact, RR intervals and battery when transmitted | Heart rate, beat count, event time and battery when transmitted |
-| Trek DuoTrap S | Wheel speed, crank cadence, counters and battery | Profile not yet integrated |
+| Trek DuoTrap S | Wheel speed, crank cadence, counters and battery | Wheel speed, crank cadence and counters; no battery field in the combined ANT+ profile |
 | Trek Ion Pro RT / Flare RT | Mode and battery; explicit on/off/flash commands | Profile not yet integrated |
 | SRAM Force AXS 2×12 | Experimental battery-related fields and counters; gear position undecoded | Profile not yet integrated |
 
@@ -27,9 +27,9 @@ estimated from speed and cadence.
 - [ble_sensors.py](ble_sensors.py) is the BLE library. `BikeTelemetry` collects
   all BLE devices and logs measurements. The same file offers explicit `lights`,
   `sram`, `sram_bond`, `sram_batteries`, and `sram_records` maintenance commands.
-- [ant_sensors.py](ant_sensors.py) is the ANT+ library. `ANTHeartRate` receives
-  heart-rate broadcasts through the USB stick; other ANT+ profiles can be added
-  here.
+- [ant_sensors.py](ant_sensors.py) is the ANT+ library. `ANTSensorCollector`
+  receives heart-rate and combined bike speed/cadence broadcasts through the
+  USB stick; other ANT+ profiles can be added here.
 - [web_server.py](web_server.py) joins the two collectors for one Flask API.
   [web.html](web.html) renders compact, separate BLE and ANT+ columns.
 - [dashboard.py](dashboard.py) is the BLE terminal display. The web page is the
@@ -47,6 +47,17 @@ own card; speed and cadence appear in the BLE DuoTrap card. Each field shows
 the age of its last reading. Yellow marks a recently changed value. A dash
 means that no recent measurement is available. Profiles that have not been
 integrated are labelled as such.
+Both heart-rate cards show the age of the latest BPM reading. BLE also shows
+the last advertisement RSSI in dBm. The ANTUSB2 stick cannot measure received
+RSSI, so its card says `RSSI unavailable`; see the
+[ANT developer explanation](https://www.thisisant.com/forum/viewthread/3866).
+The DuoTrap cards use the same wheel circumference for both radio protocols.
+ANT+ DuoTrap uses the combined speed/cadence device type 121 and reports event
+times and revolution counts, following the
+[ANT+ profile implementation in OpenANT](https://github.com/Tigge/openant/blob/master/openant/devices/bike_speed_cadence.py).
+In a simultaneous bench spin on 2026-09-29, the final BLE/ANT+ samples were
+19.96/20.03 km/h and 32.56/32.51 rpm. The small differences reflect sample
+timing; both rates use measured revolutions and the same wheel circumference.
 
 The page polls `/api/state` every 0.5 s. One collector serves all browsers and
 continues recording with the page closed. HTTP requests never open additional
@@ -140,6 +151,9 @@ can remain connected while one light is polled. The first GATT service
 enumeration can take tens of seconds. The light poll pauses 10 s between
 cycles by default; SRAM pauses 0.5 s after each read. A pause does not imply
 that the device updates its characteristic at the same rate.
+If BlueZ still holds the chest strap or DuoTrap connection after a collector
+restart, the BLE module releases that local connection and retries discovery
+automatically.
 
 The DuoTrap display uses zero after 5 s without wheel or crank pulses as an
 inactivity convention. It shows a dash when recent data is missing.

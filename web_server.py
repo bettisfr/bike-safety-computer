@@ -14,7 +14,7 @@ from flask import Flask, jsonify, send_file
 from werkzeug.serving import make_server
 
 from ble_sensors import BikeTelemetry, TelemetryConfig
-from ant_sensors import ANTHeartRate
+from ant_sensors import ANTSensorCollector
 
 ROOT = Path(__file__).resolve().parent
 
@@ -26,7 +26,7 @@ class Collector:
         self.state = {"state": "starting", "sections": {}, "error": None}
         self.loop = None
         self.telemetry = None
-        self.ant = ANTHeartRate()
+        self.ant = ANTSensorCollector(config.wheel_circumference)
         self.closing = threading.Event()
         self.thread = threading.Thread(target=self.worker, name="bike-ble", daemon=True)
 

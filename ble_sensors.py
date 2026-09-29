@@ -209,6 +209,34 @@ class BikeTelemetry:
             except Exception as exc:
                 self.sections[key].error = f"Battery: {exc}"
 
+    async def release_stale_connection(self, key):
+        """Release a BlueZ connection left open when a sensor stops advertising."""
+        address = self.sections[key].address
+
+        async def command(action, timeout):
+            process = await asyncio.create_subprocess_exec(
+                "bluetoothctl", action, address,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            try:
+                output, _ = await asyncio.wait_for(process.communicate(), timeout)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.communicate()
+                raise
+            return process.returncode, output
+
+        try:
+            _, output = await command("info", 6)
+            if b"Connected: yes" not in output:
+                return False
+            returncode, _ = await command("disconnect", 8)
+            if returncode == 0:
+                LOG.warning("Released stale BlueZ %s connection %s", key, address)
+                return True
+        except Exception as exc:
+            LOG.warning("Could not release stale BlueZ %s connection: %s", key, exc)
+        return False
+
     async def connect(self, key):
         section = self.sections[key]
         # Never reuse a BLEDevice retained by an earlier discovery: BlueZ can
@@ -226,6 +254,8 @@ class BikeTelemetry:
             device = await BleakScanner.find_device_by_filter(matches, timeout=6)
             if device is None or self.stop.is_set():
                 self.devices.pop(key, None)
+                if key in ("cardio", "duo") and not self.stop.is_set() and await self.release_stale_connection(key):
+                    section.status = "releasing stale BlueZ connection"
                 return None
             client = BleakClient(device, timeout=90)
             try:
@@ -259,7 +289,8 @@ class BikeTelemetry:
             try:
                 client = await self.connect(key)
                 if client is None:
-                    section.status = "searching · wake the sensor"
+                    if section.status != "releasing stale BlueZ connection":
+                        section.status = "searching · wake the sensor"
                     await self.pause(2)
                     continue
                 await self.battery(key, client)

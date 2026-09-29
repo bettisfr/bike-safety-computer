@@ -1,4 +1,4 @@
-"""Read ANT+ heart-rate and battery broadcasts for the web dashboard."""
+"""ANT+ heart-rate and combined bike speed/cadence collection."""
 import logging
 import threading
 import time
@@ -6,44 +6,95 @@ import time
 LOG = logging.getLogger("bike.ant")
 
 
-class ANTHeartRate:
+class ANTRotation:
+    """Rate from 16-bit revolution counts and 1/1024 s event timestamps."""
+
     def __init__(self):
+        self.previous = None
+        self.rate = None
+        self.last_change = None
+        self.started = time.monotonic()
+
+    def update(self, count, event, now):
+        if self.previous is None:
+            self.previous = (count, event, now)
+            return
+        old_count, old_event, old_at = self.previous
+        if count == old_count:
+            return
+        turns = (count - old_count) & 0xFFFF
+        ticks = (event - old_event) & 0xFFFF
+        rate = turns * 1024 / ticks if ticks else None
+        self.rate = rate if now - old_at < 64 and rate is not None and rate <= 30 else None
+        self.last_change = now
+        self.previous = (count, event, now)
+
+    def display_rate(self, now):
+        if self.previous is None:
+            return None
+        if now - (self.last_change or self.started) > 5:
+            return 0.0
+        return self.rate
+
+
+class ANTSensorCollector:
+    def __init__(self, wheel_circumference=2.136):
+        self.wheel_circumference = wheel_circumference
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.node = None
         self.state = {
             "cardio": {"name": "COOSPO H808S", "status": "initializing ANT+",
-                       "error": "", "fields": []}
+                       "error": "", "rssi": None, "fields": []},
+            "duo": {"name": "DuoTrap S", "status": "initializing ANT+",
+                    "error": "", "rssi": None, "fields": []},
         }
+        self.received_at = {"cardio": None, "duo": None}
+        self.wheel = ANTRotation()
+        self.crank = ANTRotation()
         self.thread = threading.Thread(target=self._run, name="bike-ant", daemon=True)
 
     def snapshot(self):
         now = time.monotonic()
         with self.lock:
-            return {key: {**value, "fields": [
-                {"label": field["label"], "value": field["value"],
-                 "age_s": now - field["updated"],
-                 "changed": now - field["changed_at"] < 2}
-                for field in value["fields"]]}
-                    for key, value in self.state.items()}
+            result = {key: {**section,
+                            "packet_age_s": now - self.received_at[key]
+                            if self.received_at[key] is not None else None,
+                            "fields": [
+                                {"label": field["label"], "value": field["value"],
+                                 "age_s": now - field["updated"],
+                                 "changed": now - field["changed_at"] < 2}
+                                for field in section["fields"]]}
+                      for key, section in self.state.items()}
+            fresh = self.received_at["duo"] is not None and now - self.received_at["duo"] < 10
+            wheel = self.wheel.display_rate(now) if fresh else None
+            crank = self.crank.display_rate(now) if fresh else None
+            result["duo"]["speed_kmh"] = wheel * self.wheel_circumference * 3.6 if wheel is not None else None
+            result["duo"]["cadence_rpm"] = crank * 60 if crank is not None else None
+            return result
 
-    def _set_status(self, status, error=""):
+    def _set_status(self, key, status, error=""):
         with self.lock:
-            item = self.state["cardio"]
-            item["status"], item["error"] = status, error
+            self.state[key]["status"] = status
+            self.state[key]["error"] = error
 
-    def _put(self, label, value):
+    def _record_locked(self, key, values, now):
+        section = self.state[key]
+        fields = {field["label"]: field for field in section["fields"]}
+        for label, value in values.items():
+            value = str(value)
+            old = fields.get(label)
+            fields[label] = {"label": label, "value": value,
+                             "changed_at": now if old is None or old["value"] != value
+                             else old["changed_at"], "updated": now}
+        section["fields"] = list(fields.values())
+        section["status"], section["error"] = "connected", ""
+        self.received_at[key] = now
+
+    def _record(self, key, values):
         now = time.monotonic()
         with self.lock:
-            item = self.state["cardio"]
-            fields = {field["label"]: field for field in item["fields"]}
-            old = fields.get(label)
-            fields[label] = {"label": label, "value": str(value),
-                             "changed_at": now if old is None or old["value"] != str(value)
-                             else old["changed_at"],
-                             "updated": now}
-            item["fields"] = list(fields.values())
-            item["status"], item["error"] = "connected", ""
+            self._record_locked(key, values, now)
 
     def _run(self):
         try:
@@ -53,47 +104,72 @@ class ANTHeartRate:
             from openant.easy.node import Node
         except Exception as exc:
             LOG.exception("ANT+ package unavailable")
-            self._set_status("ANT+ error", f"{type(exc).__name__}: {exc}")
+            for key in self.state:
+                self._set_status(key, "ANT+ error", f"{type(exc).__name__}: {exc}")
             return
 
         while not self.stop_event.is_set():
             node = None
             try:
-                self._set_status("searching for ANT+ chest strap…")
+                for key in self.state:
+                    self._set_status(key, "searching ANT+…")
                 node = Node()
                 self.node = node
                 node.set_network_key(0, ANTPLUS_NETWORK_KEY)
-                scanner = Scanner(node, device_type=DeviceType.HeartRate.value)
-                selected = [None]
+                cardio = Scanner(node, device_type=DeviceType.HeartRate.value, period=8070)
+                duo = Scanner(node, device_type=DeviceType.BikeSpeedCadence.value, period=8086)
+                selected = {"cardio": None, "duo": None}
 
-                def on_packet(data):
-                    scanner._on_data(data)
-                    if len(data) < 8 or not scanner.found:
+                def cardio_packet(data):
+                    cardio._on_data(data)
+                    if len(data) < 13 or not cardio.found:
                         return
-                    device_id = data[9] | data[10] << 8 if len(data) >= 13 else None
-                    if selected[0] is None and device_id is not None:
-                        selected[0] = device_id
-                        self._put("ANT+ ID", device_id)
-                    if device_id != selected[0]:
+                    device_id = data[9] | data[10] << 8
+                    if selected["cardio"] is None:
+                        selected["cardio"] = device_id
+                    if device_id != selected["cardio"] or (data[0] & 0x0F) > 7:
                         return
-                    page = data[0] & 0x0F
-                    if page > 7:
-                        return
-                    self._put("Heart rate", f"{data[7]} bpm")
-                    self._put("Beat count", data[6])
-                    self._put("Event time", f"{int.from_bytes(data[4:6], 'little') / 1024:.3f} s")
-                    if page == 7 and data[1] <= 100:
-                        self._put("Battery", f"{data[1]} %")
+                    values = {"ANT+ ID": device_id, "Heart rate": f"{data[7]} bpm",
+                              "Beat count": data[6],
+                              "Event time": f"{int.from_bytes(data[4:6], 'little') / 1024:.3f} s"}
+                    if data[0] & 0x0F == 7 and data[1] <= 100:
+                        values["Battery"] = f"{data[1]} %"
+                    self._record("cardio", values)
 
-                scanner.channel.on_broadcast_data = on_packet
-                self._set_status("listening on ANT+ · wear the chest strap")
+                def duo_packet(data):
+                    if len(data) < 13 or data[11] != DeviceType.BikeSpeedCadence.value:
+                        return
+                    device_id = data[9] | data[10] << 8
+                    if selected["duo"] is None:
+                        selected["duo"] = device_id
+                    if device_id != selected["duo"]:
+                        return
+                    crank_time = int.from_bytes(data[0:2], "little")
+                    crank_count = int.from_bytes(data[2:4], "little")
+                    wheel_time = int.from_bytes(data[4:6], "little")
+                    wheel_count = int.from_bytes(data[6:8], "little")
+                    now = time.monotonic()
+                    with self.lock:
+                        self.crank.update(crank_count, crank_time, now)
+                        self.wheel.update(wheel_count, wheel_time, now)
+                        self._record_locked("duo", {
+                            "ANT+ ID": device_id,
+                            "Wheel · cumulative revolutions": wheel_count,
+                            "Wheel · event time": f"{wheel_time} /1024 s (modulo 64 s)",
+                            "Crank · cumulative revolutions": crank_count,
+                            "Crank · event time": f"{crank_time} /1024 s (modulo 64 s)",
+                        }, now)
+
+                cardio.channel.on_broadcast_data = cardio_packet
+                duo.channel.on_broadcast_data = duo_packet
+                self._set_status("cardio", "listening on ANT+ · wear the chest strap")
+                self._set_status("duo", "listening on ANT+ · spin the wheel and crank")
                 node.start()
-                if not self.stop_event.is_set():
-                    scanner.close_channel()
             except Exception as exc:
                 if not self.stop_event.is_set():
-                    LOG.exception("ANT+ heart-rate collector stopped")
-                    self._set_status("ANT+ error · retrying", f"{type(exc).__name__}: {exc}")
+                    LOG.exception("ANT+ collector stopped")
+                    for key in self.state:
+                        self._set_status(key, "ANT+ error · retrying", f"{type(exc).__name__}: {exc}")
             finally:
                 self.node = None
                 try:
