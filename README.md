@@ -12,7 +12,7 @@ and power meters are possible future additions.
 ## Project layout
 
 - [ble_sensors.py](ble_sensors.py) collects BLE readings and provides explicit
-  light and SRAM maintenance commands.
+  light commands.
 - [ant_sensors.py](ant_sensors.py) collects ANT+ readings from the USB stick.
 - [web_server.py](web_server.py) serves a shared telemetry API and web page.
 - [templates/index.html](templates/index.html) is the page; [static/style.css](static/style.css)
@@ -21,9 +21,9 @@ and power meters are possible future additions.
 - [drivetrain.json](drivetrain.json) holds the bike-specific drivetrain setup.
 - [scripts/rpi.sh](scripts/rpi.sh) deploys and manages the Raspberry Pi service.
 
-The web page displays BLE and ANT+ readings in separate columns. Only fields
-received from a device are shown. Battery data remains associated with its
-source protocol; ANT+ battery categories or voltage are not converted into
+The web page displays ANT+ readings. The collector also keeps BLE readings
+available through the API and terminal dashboard. Only fields received from a
+device are shown. ANT+ battery categories or voltage are not converted into
 percentages.
 
 ## Raspberry Pi
@@ -54,11 +54,5 @@ starting it:
 ./scripts/rpi.sh dashboard
 ```
 
-Run `./scripts/rpi.sh help` for maintenance commands, including light control,
-SRAM diagnostics, and copying recordings back to the PC.
-
-## Attribution
-
-Parts of the BLE SRAMBond implementation in [ble_sensors.py](ble_sensors.py)
-are adapted from [Gabor Wnuk's sram-axs](https://github.com/GaborWnuk/sram-axs)
-under MPL-2.0. Attribution and the license notice are retained in the source.
+Run `./scripts/rpi.sh help` for maintenance commands, including light control
+and copying recordings back to the PC.

@@ -40,9 +40,9 @@ case "$ACTION" in
     if (($#)); then printf -v REMOTE '%q ' "$@"; fi
     ssh -t "$HOST" "exec \"\$HOME/pyenv/bin/python\" \"\$HOME/bike-safety-computer/dashboard.py\" $REMOTE"
     ;;
-  lights|sram|sram_bond|sram_batteries)
+  lights)
     REMOTE=""
-    if (($#)); then printf -v REMOTE '%q ' "$@"; elif [[ "$ACTION" == lights ]]; then REMOTE=status; elif [[ "$ACTION" == sram ]]; then REMOTE=scan; else REMOTE=--help; fi
+    if (($#)); then printf -v REMOTE '%q ' "$@"; else REMOTE=status; fi
     ssh "$HOST" "exec \"\$HOME/pyenv/bin/python\" \"\$HOME/bike-safety-computer/ble_sensors.py\" $ACTION $REMOTE"
     ;;
   fetch)
@@ -50,10 +50,9 @@ case "$ACTION" in
     scp -r "$HOST:bike-safety-computer/data/." "$ROOT/data/rpi/"
     ;;
   *)
-    echo 'Usage: scripts/rpi.sh {deploy|web|dashboard [--raw]|run|start|stop|restart|status|logs|enable|disable|fetch|lights [status|on|off|flash] [--light front|rear|both]|sram [scan|probe|capture]|sram_bond [bond|read]|sram_batteries}'
+    echo 'Usage: scripts/rpi.sh {deploy|web|dashboard [--raw]|run|start|stop|restart|status|logs|enable|disable|fetch|lights [status|on|off|flash] [--light front|rear|both]}'
     echo 'Dashboard: scripts/rpi.sh dashboard [--raw] [--wheel-circumference 2.136]'
     echo 'Host override: RPI_HOST=user@hostname scripts/rpi.sh deploy'
-    echo 'SRAM read-only: scripts/rpi.sh sram {scan|probe} [--address MAC] [--seconds 20]'
     [[ "$ACTION" == help ]]
     ;;
 esac

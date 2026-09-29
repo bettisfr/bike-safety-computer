@@ -1,12 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
-"""BLE sensor collection and maintenance commands for this bike.
-
-Live collection is read-only; explicit CLI commands can control lights or bond SRAM.
-"""
+"""BLE sensor collection and light maintenance commands for this bike."""
 import argparse
 import asyncio
-import os
-import secrets
 import json
 import logging
 import time
@@ -15,25 +10,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from bleak import BleakClient, BleakScanner
-from Crypto.Cipher import AES
 
 LOG = logging.getLogger("bike.telemetry")
 
-# SRAMBond code below is adapted from Gabor Wnuk's sram-axs (copyright 2026)
-# under the Mozilla Public License 2.0.
-# https://github.com/GaborWnuk/sram-axs/blob/main/packages/axs-core/src/axs/srambond-bond.ts
-# https://mozilla.org/MPL/2.0/
 MODE = "71261001-3692-ae93-e711-472ba41689c9"
 LIGHTS = {"front": "Ion Pro RT", "rear": "Flare RT"}
-BOND = "d905ee52" + "-90aa-4c7c-b036-1e01fb8eb7ee"
-MODULUS = (1 << 128) - 713
-SRAM_RECORD_UUID = "d9050003-90aa-4c7c-b036-1e01fb8eb7ee"
 
 BATTERY = "00002a19-0000-1000-8000-00805f9b34fb"
 CSC = "00002a5b-0000-1000-8000-00805f9b34fb"
 BASE = "-90aa-4c7c-b036-1e01fb8eb7ee"
-READABLE = {BATTERY, *(f"d905{s}{BASE}" for s in
-              ("fe54", "fe56", "fe58", "fff1", "fff2", "000a", "0002", "0003", "000b", "0024", "0025"))}
 DEVICES = {
     "cardio": ("CARDIO · COOSPO H808S", "D5:C5:6C:0E:23:41"),
     "duo": ("DUOTRAP S · wheel and crank", "CA:E3:18:C1:45:76"),
@@ -563,267 +548,8 @@ async def lights_command(args):
     return 1 if failed else 0
 
 
-def is_sram(device, adv):
-    name = adv.local_name or device.name or ""
-    return "sram" in name.lower() or 0x0933 in adv.manufacturer_data or any(
-        u.startswith("d905") or u.startswith("0000fe51") for u in adv.service_uuids)
-
-
-async def sram_command(args):
-    if args.action == "scan":
-        devices = await BleakScanner.discover(timeout=args.seconds, return_adv=True)
-        results = [{"address": d.address, "name": a.local_name or d.name,
-                    "rssi": a.rssi, "services": a.service_uuids}
-                   for d, a in devices.values() if is_sram(d, a)]
-        print(json.dumps(results, indent=2))
-        return 0 if results else 1
-    if args.address:
-        device = await BleakScanner.find_device_by_address(args.address, timeout=args.seconds)
-    else:
-        device = await BleakScanner.find_device_by_filter(is_sram, timeout=args.seconds)
-    if device is None:
-        raise RuntimeError("SRAM not found: wake the derailleur and close the phone app")
-    report = {"timestamp": datetime.now(timezone.utc).isoformat(),
-              "address": device.address, "name": device.name, "services": [], "reads": {}}
-    print(json.dumps({"found": device.name, "address": device.address}), flush=True)
-    async with BleakClient(device, timeout=30) as client:
-        if args.action == "capture":
-            output = Path(__file__).resolve().parent / "data"
-            output.mkdir(exist_ok=True)
-            path = output / ("sram-capture-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".jsonl")
-            targets = [f"d905{s}{BASE}" for s in ("0002", "0003", "000b", "0024", "0025")
-                       if client.services.get_characteristic(f"d905{s}{BASE}")]
-            print("BASELINE: keep gears unchanged for 10 seconds", flush=True)
-            started = time.monotonic()
-            announced = False
-            count = 0
-            with path.open("w", buffering=1) as stream:
-                while time.monotonic() - started < args.seconds:
-                    if not announced and time.monotonic() - started >= 10:
-                        print("SHIFT NOW: rear shifts only", flush=True)
-                        announced = True
-                    for uuid in targets:
-                        row = {"timestamp": datetime.now(timezone.utc).isoformat(),
-                               "elapsed_s": time.monotonic() - started, "uuid": uuid,
-                               "address": device.address}
-                        try:
-                            raw = await asyncio.wait_for(client.read_gatt_char(uuid), 3)
-                            row["hex"] = raw.hex()
-                        except Exception as exc:
-                            row["error"] = str(exc)
-                        stream.write(json.dumps(row) + "\n")
-                        count += 1
-                    await asyncio.sleep(0.3)
-            print(f"DONE: {count} reads saved to {path}", flush=True)
-            return 0
-        for service in client.services:
-            report["services"].append({"uuid": service.uuid, "characteristics": [
-                {"uuid": ch.uuid, "properties": ch.properties} for ch in service.characteristics]})
-            for ch in service.characteristics:
-                standard_info = ch.uuid in {f"00002a{x}-0000-1000-8000-00805f9b34fb"
-                                            for x in ("24", "26", "27", "28", "29")}
-                if "read" not in ch.properties or not (ch.uuid in READABLE or standard_info):
-                    continue
-                try:
-                    raw = bytes(await asyncio.wait_for(client.read_gatt_char(ch), 5))
-                    value = {"hex": raw.hex(), "length": len(raw)}
-                    if ch.uuid == BATTERY and len(raw) == 1 and raw[0] <= 100:
-                        value["battery_percent"] = raw[0]
-                    if standard_info:
-                        value["text"] = raw.decode("utf-8", errors="replace")
-                    report["reads"][ch.uuid] = value
-                except Exception as exc:
-                    report["reads"][ch.uuid] = {"error": str(exc)}
-    output = Path(__file__).resolve().parent / "data"
-    output.mkdir(exist_ok=True)
-    path = output / ("sram-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S-%fZ") + ".json")
-    path.write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps(report, indent=2))
-    print(f"Saved: {path}")
-    return 0
-
-
-def decode_sram_battery(payload):
-    # Decode only the documented battery record, not identity/build records.
-    if len(payload) < 12 or payload[:2] != b"\x00\x00" or payload[4:7] != b"\x00\x04\x05":
-        return {"format": "unrecognized"}
-    voltage = int.from_bytes(payload[7:9], "little")
-    percent = payload[11]
-    return {"format": "documented_12_byte_prefix", "voltage_mv_candidate": voltage,
-            "battery_percent_candidate": percent if percent <= 100 else None,
-            "percent_supported": percent != 255,
-            "validation": "upstream decoder; not independently calibrated on this device"}
-
-
-async def batteries_command(seconds):
-    output = Path(__file__).resolve().parent / "data"
-    output.mkdir(exist_ok=True)
-    path = output / ("sram-batteries-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".jsonl")
-    latest = {}
-    with path.open("w", buffering=1) as stream:
-        def received(device, adv):
-            name = adv.local_name or device.name or ""
-            payload = adv.manufacturer_data.get(2355)
-            if "sram" not in name.lower() and payload is None:
-                return
-            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "address": device.address,
-                   "name": name, "rssi": adv.rssi,
-                   "manufacturer_data": {str(k): v.hex() for k, v in adv.manufacturer_data.items()},
-                   "service_data": {k: v.hex() for k, v in adv.service_data.items()}}
-            if payload is not None:
-                row.update(decode_sram_battery(payload))
-            stream.write(json.dumps(row) + "\n")
-            if latest.get(device.address, {}).get("manufacturer_data") != row["manufacturer_data"] or device.address not in latest:
-                print(json.dumps(row), flush=True)
-            latest[device.address] = row
-        print(f"Listening for SRAM advertisements for {seconds}s", flush=True)
-        async with BleakScanner(received):
-            await asyncio.sleep(seconds)
-    print(f"Finished: {len(latest)} devices; saved {path}", flush=True)
-
-
-def public_key(private):
-    if len(private) != 16:
-        raise ValueError("Private key must be 16 bytes")
-    return pow(5, int.from_bytes(private, "little"), MODULUS).to_bytes(16, "big")
-
-
-def shared_key(private, peer):
-    value = int.from_bytes(peer, "big")
-    if len(private) != 16 or len(peer) != 16 or not 1 < value < MODULUS - 1:
-        raise ValueError("Invalid DH key")
-    return pow(value, int.from_bytes(private, "little"), MODULUS).to_bytes(16, "big")
-
-
-def decrypt(key, frame):
-    if len(frame) < 32:
-        raise ValueError("Frame shorter than nonce and authentication tag")
-    cipher = AES.new(key, AES.MODE_EAX, nonce=frame[:16], mac_len=16)
-    return cipher.decrypt_and_verify(frame[16:-16], frame[-16:])
-
-
-def store_key(path, key):
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as stream:
-        stream.write(key.hex() + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    temporary.replace(path)
-
-
-async def bond(client, path, diagnose=False):
-    inbox = asyncio.Queue()
-    await client.start_notify(BOND, lambda _, value: inbox.put_nowait(bytes(value)))
-    try:
-        print("Pairing: init", flush=True)
-        await asyncio.wait_for(client.write_gatt_char(BOND, bytes(range(16)), response=True), 8)
-        if diagnose:
-            trace = []
-            async def collect(stage):
-                packets = []
-                for _ in range(12):
-                    try:
-                        packet = await asyncio.wait_for(inbox.get(), 2)
-                    except asyncio.TimeoutError:
-                        break
-                    packets.append(packet)
-                trace.append({"stage": stage, "lengths": [len(p) for p in packets],
-                              "response_hex": b"".join(packets).hex()})
-                print(f"{stage}: notification lengths {[len(p) for p in packets]}", flush=True)
-            await collect("init")
-            await asyncio.wait_for(client.write_gatt_char(BOND, public_key(secrets.token_bytes(16)), response=True), 8)
-            await collect("public_key")
-            output = path.parent.parent / "data"
-            output.mkdir(exist_ok=True)
-            (output / "sram-handshake-diagnostic.json").write_text(json.dumps(trace, indent=2) + "\n")
-            raise RuntimeError("Diagnostic saved; no finalize sent and no key saved")
-        private = secrets.token_bytes(16)
-        print("Pairing: client public key", flush=True)
-        await asyncio.wait_for(client.write_gatt_char(BOND, public_key(private), response=True), 8)
-        peer = await asyncio.wait_for(inbox.get(), 8)
-        print(f"Pairing: first response {len(peer)} bytes", flush=True)
-        # Test whether older firmware packs the public key + transport blob
-        # across ATT-sized notifications instead of preserving message boundaries.
-        combined = peer
-        for _ in range(8):
-            if len(combined) >= 64:
-                break
-            part = await asyncio.wait_for(inbox.get(), 8)
-            print(f"Pairing: additional notification {len(part)} bytes", flush=True)
-            combined += part
-        if len(combined) != 64:
-            raise ValueError(f"Handshake response length {len(combined)}, expected 64")
-        shared = shared_key(private, combined[:16])
-        blob = combined[16:]
-        if len(blob) != 48:
-            raise ValueError(f"Key transport length {len(blob)}, expected 48")
-        key = decrypt(shared, blob)
-        if len(key) != 16:
-            raise ValueError("Invalid transported key length")
-        # Keep a recoverable local key even if the final BLE response is lost.
-        store_key(path, key)
-        print("Pairing: authenticated key saved; finalize", flush=True)
-        await asyncio.wait_for(client.write_gatt_char(BOND, b"\x73", response=True), 8)
-        print("Pairing completed (key not printed)", flush=True)
-        return key
-    finally:
-        if client.is_connected:
-            await client.stop_notify(BOND)
-
-
-async def bond_command(args):
-    root = Path(__file__).resolve().parent
-    path = root / ".secrets" / (args.address.replace(":", "").lower() + ".key")
-    if args.action == "bond" and not args.ready:
-        raise RuntimeError("Put the derailleur in AXS pairing mode, then pass --ready")
-    if args.action == "bond" and path.exists():
-        raise RuntimeError("A key already exists; use read to avoid replacing the bond")
-    device = await BleakScanner.find_device_by_address(args.address, timeout=30)
-    if device is None:
-        raise RuntimeError("SRAM device not found")
-    print(f"Connecting to {device.name}", flush=True)
-    async with BleakClient(device, timeout=30) as client:
-        key = await bond(client, path, args.diagnose) if args.action == "bond" else bytes.fromhex(path.read_text().strip())
-        report = {"timestamp": datetime.now(timezone.utc).isoformat(), "address": args.address,
-                  "characteristics": [ch.uuid for s in client.services for ch in s.characteristics],
-                  "reads": {}}
-        targets = ["d905" + short + BASE for short in
-                   ("000b", "0024", "0025", "0003", "0002", "0008", "0006", "0011", "0021", "0022")]
-        if args.all_readable:
-            targets = [ch.uuid for service in client.services for ch in service.characteristics
-                       if "read" in ch.properties and ch.uuid not in (BOND, "d905ee53" + BASE)]
-        report["user_reported_gear"] = args.gear_label
-        report["all_readable_except_bond_tokens"] = args.all_readable
-        for uuid in targets:
-            ch = client.services.get_characteristic(uuid)
-            if ch is None or "read" not in ch.properties:
-                continue
-            samples = []
-            for _ in range(2):
-                try:
-                    raw = bytes(await asyncio.wait_for(client.read_gatt_char(ch), 5))
-                    row = {"raw_hex": raw.hex(), "length": len(raw)}
-                    try:
-                        row["authenticated_plaintext_hex"] = decrypt(key, raw).hex()
-                    except ValueError:
-                        row["authenticated"] = False
-                    samples.append(row)
-                except Exception as exc:
-                    samples.append({"error": str(exc)})
-            report["reads"][uuid] = samples
-        output = root / "data"
-        output.mkdir(exist_ok=True)
-        target = output / ("sram-bond-probe-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".json")
-        target.write_text(json.dumps(report, indent=2) + "\n")
-        print(json.dumps(report, indent=2), flush=True)
-        print(f"Saved: {target}")
-
-
-
 def main():
-    """Run explicit BLE maintenance commands; live collection uses BikeTelemetry."""
+    """Run explicit light commands; live collection uses BikeTelemetry."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -831,55 +557,9 @@ def main():
     lights.add_argument("action", choices=["status", "on", "off", "flash"])
     lights.add_argument("--light", choices=["front", "rear", "both"], default="both")
 
-    sram = commands.add_parser("sram", help="Inspect SRAM AXS via BLE")
-    sram.add_argument("action", choices=["scan", "probe", "capture"])
-    sram.add_argument("--address")
-    sram.add_argument("--seconds", type=float, default=20)
-
-    bond = commands.add_parser("sram_bond", help="Experimental SRAMBond")
-    bond.add_argument("action", choices=["bond", "read"])
-    bond.add_argument("--address", required=True)
-    bond.add_argument("--ready", action="store_true")
-    bond.add_argument("--diagnose", action="store_true")
-    bond.add_argument("--all-readable", action="store_true")
-    bond.add_argument("--gear-label")
-
-    batteries = commands.add_parser("sram_batteries", help="Capture SRAM battery advertisements")
-    batteries.add_argument("--seconds", type=float, default=45)
-
-    records = commands.add_parser("sram_records", help="Decode a saved SRAM probe")
-    records.add_argument("probe", type=Path)
-    records.add_argument("--output", type=Path)
-
     args = parser.parse_args()
-    if args.command in {"sram", "sram_batteries"} and args.seconds <= 0:
-        parser.error("--seconds must be positive")
     if args.command == "lights":
         raise SystemExit(asyncio.run(lights_command(args)))
-    if args.command == "sram":
-        raise SystemExit(asyncio.run(sram_command(args)))
-    if args.command == "sram_bond":
-        try:
-            asyncio.run(bond_command(args))
-        except Exception as exc:
-            parser.exit(1, f"Failed: {type(exc).__name__}: {exc}\n")
-    if args.command == "sram_batteries":
-        asyncio.run(batteries_command(args.seconds))
-    if args.command == "sram_records":
-        probe = json.loads(args.probe.read_text())
-        samples = probe["reads"][SRAM_RECORD_UUID]
-        if isinstance(samples, dict):
-            samples = [samples]
-        report = {
-            "source": str(args.probe), "timestamp": probe.get("timestamp"),
-            "validation": "Experimental layout; voltage and status semantics unverified; not live data",
-            "samples": [extract_sram(bytes.fromhex(sample.get("raw_hex", sample.get("hex", ""))))
-                        for sample in samples],
-        }
-        rendered = json.dumps(report, indent=2) + "\n"
-        if args.output:
-            args.output.write_text(rendered)
-        print(rendered, end="")
 
 
 if __name__ == "__main__":
