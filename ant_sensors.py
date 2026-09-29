@@ -1,9 +1,15 @@
-"""ANT+ heart-rate and combined bike speed/cadence collection."""
+"""ANT+ heart rate, bike speed/cadence, and bicycle light collection."""
 import logging
 import threading
 import time
 
 LOG = logging.getLogger("bike.ant")
+LIGHT_BATTERY = {1: "Full", 2: "Good", 3: "OK", 4: "Low", 5: "Critical", 6: "Charging"}
+LIGHT_MODES = {
+    0: "Off", 1: "Steady 81–100%", 2: "Steady 61–80%",
+    3: "Steady 41–60%", 4: "Steady 21–40%", 5: "Steady 0–20%",
+    6: "Slow flash", 7: "Fast flash", 8: "Random flash", 9: "Auto",
+}
 
 
 class ANTRotation:
@@ -48,8 +54,12 @@ class ANTSensorCollector:
                        "error": "", "rssi": None, "fields": []},
             "duo": {"name": "DuoTrap S", "status": "initializing ANT+",
                     "error": "", "rssi": None, "fields": []},
+            "front": {"name": "Ion Pro RT", "status": "initializing ANT+",
+                      "error": "", "rssi": None, "fields": []},
+            "rear": {"name": "Flare RT", "status": "initializing ANT+",
+                     "error": "", "rssi": None, "fields": []},
         }
-        self.received_at = {"cardio": None, "duo": None}
+        self.received_at = {key: None for key in self.state}
         self.wheel = ANTRotation()
         self.crank = ANTRotation()
         self.thread = threading.Thread(target=self._run, name="bike-ant", daemon=True)
@@ -118,6 +128,7 @@ class ANTSensorCollector:
                 node.set_network_key(0, ANTPLUS_NETWORK_KEY)
                 cardio = Scanner(node, device_type=DeviceType.HeartRate.value, period=8070)
                 duo = Scanner(node, device_type=DeviceType.BikeSpeedCadence.value, period=8086)
+                lights = Scanner(node, device_type=35, period=4084)
                 selected = {"cardio": None, "duo": None}
 
                 def cardio_packet(data):
@@ -160,10 +171,41 @@ class ANTSensorCollector:
                             "Crank · event time": f"{crank_time} /1024 s (modulo 64 s)",
                         }, now)
 
+                def light_packet(data):
+                    # Bike Lights profile, data page 1 (Light States 1).
+                    if len(data) < 13 or data[11] != 35 or data[0] != 1:
+                        return
+                    light_type = (data[2] >> 2) & 7
+                    key = {0: "front", 2: "rear"}.get(light_type)
+                    if key is None:
+                        return
+                    device_id = data[9] | data[10] << 8
+                    if selected.get(key) is None:
+                        selected[key] = device_id
+                    if device_id != selected[key]:
+                        return
+                    battery_code = (data[2] >> 5) & 7
+                    mode_code = (data[6] >> 2) & 63
+                    values = {
+                        "ANT+ ID": device_id,
+                        "Battery status": LIGHT_BATTERY.get(battery_code, "Unavailable"),
+                        "Mode": LIGHT_MODES.get(
+                            mode_code,
+                            f"Custom mode {mode_code}" if mode_code >= 48
+                            else f"Reserved mode {mode_code}"),
+                        "Mode code": mode_code,
+                    }
+                    if data[7] <= 100:
+                        values["Intensity"] = f"{data[7]} %"
+                    self._record(key, values)
+
                 cardio.channel.on_broadcast_data = cardio_packet
                 duo.channel.on_broadcast_data = duo_packet
+                lights.channel.on_broadcast_data = light_packet
                 self._set_status("cardio", "listening on ANT+ · wear the chest strap")
                 self._set_status("duo", "listening on ANT+ · spin the wheel and crank")
+                self._set_status("front", "listening on ANT+ · turn on the light")
+                self._set_status("rear", "listening on ANT+ · turn on the light")
                 node.start()
             except Exception as exc:
                 if not self.stop_event.is_set():

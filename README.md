@@ -12,7 +12,7 @@ and power meters are possible future additions.
 | --- | --- | --- |
 | COOSPO H808S | Heart rate, contact, RR intervals and battery when transmitted | Heart rate, beat count, event time and battery when transmitted |
 | Trek DuoTrap S | Wheel speed, crank cadence, counters and battery | Wheel speed, crank cadence and counters; no battery field in the combined ANT+ profile |
-| Trek Ion Pro RT / Flare RT | Mode and battery; explicit on/off/flash commands | Profile not yet integrated |
+| Trek Ion Pro RT / Flare RT | Mode and battery percentage; explicit on/off/flash commands | Reported mode, battery category and intensity when transmitted |
 | SRAM Force AXS 2×12 | Experimental battery-related fields and counters; gear position undecoded | Profile not yet integrated |
 
 The device addresses in [ble_sensors.py](ble_sensors.py) belong to the bike used
@@ -28,8 +28,8 @@ estimated from speed and cadence.
   all BLE devices and logs measurements. The same file offers explicit `lights`,
   `sram`, `sram_bond`, `sram_batteries`, and `sram_records` maintenance commands.
 - [ant_sensors.py](ant_sensors.py) is the ANT+ library. `ANTSensorCollector`
-  receives heart-rate and combined bike speed/cadence broadcasts through the
-  USB stick; other ANT+ profiles can be added here.
+  receives heart rate, combined bike speed/cadence, and bicycle light
+  broadcasts through the USB stick.
 - [web_server.py](web_server.py) joins the two collectors for one Flask API.
   [web.html](web.html) renders compact, separate BLE and ANT+ columns.
 - [dashboard.py](dashboard.py) is the BLE terminal display. The web page is the
@@ -151,14 +151,24 @@ can remain connected while one light is polled. The first GATT service
 enumeration can take tens of seconds. The light poll pauses 10 s between
 cycles by default; SRAM pauses 0.5 s after each read. A pause does not imply
 that the device updates its characteristic at the same rate.
-If BlueZ still holds the chest strap or DuoTrap connection after a collector
-restart, the BLE module releases that local connection and retries discovery
-automatically.
+If BlueZ still holds a chest strap, DuoTrap or light connection after a
+collector restart, the BLE module releases that local connection and retries
+discovery automatically.
 
 The DuoTrap display uses zero after 5 s without wheel or crank pulses as an
 inactivity convention. It shows a dash when recent data is missing.
 
 ## Trek lights
+
+The ANT+ collector listens for Bike Lights profile (device type 35) page 1
+from the Ion Pro RT and Flare RT. When a light is broadcasting, its ANT+ card
+shows the reported mode, intensity (when available), and battery status
+(Full/Good/OK/Low/Critical/Charging). The ANT+ battery status is a category,
+not a percentage. A light that has never transmitted remains in the listening
+state; the age and faded card indicate when received data has gone stale.
+Silence alone does not establish whether the light is off, out of range, or
+paired to another controller. The BLE card continues to show its independently read
+battery percentage and mode.
 
 The BLE `lights` command discovers Ion Pro RT and Flare RT by advertised name,
 reads their batteries and mode tables, and can select off, low steady, or Day

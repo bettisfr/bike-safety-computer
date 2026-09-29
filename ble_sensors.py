@@ -254,7 +254,7 @@ class BikeTelemetry:
             device = await BleakScanner.find_device_by_filter(matches, timeout=6)
             if device is None or self.stop.is_set():
                 self.devices.pop(key, None)
-                if key in ("cardio", "duo") and not self.stop.is_set() and await self.release_stale_connection(key):
+                if key in ("cardio", "duo", "front", "rear") and not self.stop.is_set() and await self.release_stale_connection(key):
                     section.status = "releasing stale BlueZ connection"
                 return None
             client = BleakClient(device, timeout=90)
