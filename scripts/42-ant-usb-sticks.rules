@@ -1,0 +1,2 @@
+# ANTUSB2 (0fcf:1008): allow the bike service user to open the USB dongle.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0fcf", ATTR{idProduct}=="1008", MODE="0660", GROUP="plugdev"

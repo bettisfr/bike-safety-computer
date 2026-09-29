@@ -1,44 +1,44 @@
 <!doctype html>
-<html lang="it">
+<html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Bike · Telemetria</title>
+<title>Bike · Telemetry</title>
 <style>
-:root{color-scheme:dark;--bg:#101615;--card:#192220;--line:#30403a;--ink:#edf5ef;--muted:#a4b5aa;--green:#adf077;--amber:#ffd17b}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px system-ui,sans-serif}main{max-width:1440px;margin:auto;padding:32px}header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:28px}h1{font-size:30px;margin:3px 0;letter-spacing:-1px}h2{font-size:17px;margin:0}.eyebrow{text-transform:uppercase;letter-spacing:3px;font-size:11px;color:var(--green)}.muted,small{color:var(--muted)}.pill{border:1px solid var(--line);border-radius:30px;padding:9px 14px;font-size:13px}.ok{color:var(--green)}.warn{color:var(--amber)}.heroes{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px}.hero,.sensor{border:1px solid var(--line);border-radius:16px;background:var(--card);padding:22px}.hero .number{font-size:clamp(36px,5vw,66px);font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-2px;line-height:1.2;margin-top:12px}.unit{font-size:16px;letter-spacing:0;color:var(--muted);margin-left:8px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.sensor:last-child{grid-column:1/-1}.sensor-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:8px}.status{font-size:12px;color:var(--muted);margin-bottom:15px;min-height:18px}.fields{width:100%;border-collapse:collapse}.fields td{padding:10px 0;border-top:1px solid var(--line);vertical-align:top}.fields td:first-child{color:var(--muted);width:43%;padding-right:12px}.fields td:nth-child(2){font-variant-numeric:tabular-nums;overflow-wrap:anywhere;transition:color .25s}.fields td:last-child{text-align:right;color:var(--muted);font-size:11px;white-space:nowrap;padding-left:10px}.changed{color:var(--amber)}.stale{opacity:.5}.error{color:var(--amber);font-size:13px;overflow-wrap:anywhere;margin-top:10px}.empty{padding:20px 0;color:var(--muted)}footer{margin-top:24px;font-size:12px;color:var(--muted);line-height:1.8}.banner{display:none;padding:14px;border:1px solid var(--amber);border-radius:12px;margin-bottom:18px;color:var(--amber)}.signal{font:11px monospace;color:var(--muted);white-space:nowrap}a{color:var(--green)}@media(max-width:780px){main{padding:18px}.grid{grid-template-columns:1fr}.heroes{gap:8px}.hero{padding:14px}.hero .number{font-size:34px}.unit{display:block;margin:0;font-size:12px}.sensor{padding:16px}header{align-items:flex-start}h1{font-size:25px}}@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+:root{color-scheme:light;--bg:#f5f7f5;--card:#fff;--line:#d7e0d9;--ink:#18251d;--muted:#506157;--green:#176c42;--amber:#925300}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px system-ui,sans-serif}main{max-width:1600px;margin:auto;padding:16px}header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}h1{font-size:22px;margin:0}.eyebrow{font-size:10px;letter-spacing:2px;color:var(--green);text-transform:uppercase}.pill{border:1px solid var(--line);border-radius:20px;padding:5px 10px;font-size:12px;white-space:nowrap}.ok{color:var(--green)}.warn{color:var(--amber)}.protocols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}.protocol{min-width:0}.protocol-head{display:flex;align-items:baseline;gap:10px;margin-bottom:7px}.protocol-head h2{font-size:18px;margin:0}.protocol-head span{color:var(--muted);font-size:11px}.cards{display:grid;gap:7px}.sensor{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:7px 10px;min-width:0}.sensor-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}.sensor h3{font-size:13px;margin:0}.metrics{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}.status,.signal{color:var(--muted);font-size:11px}.signal{white-space:nowrap}.status{margin:2px 0}.fields{width:100%;border-collapse:collapse;font-size:12px}.fields td{padding:2px 0;border-top:1px solid #edf0ed;vertical-align:top}.fields td:first-child{color:var(--muted);width:42%}.fields td:nth-child(2){font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.fields td:last-child{text-align:right;color:var(--muted);font-size:10px;white-space:nowrap}.changed{color:var(--amber)}.stale{opacity:.6}.error,.banner{color:var(--amber);font-size:11px;overflow-wrap:anywhere}.banner{display:none;border:1px solid var(--amber);border-radius:8px;padding:7px;margin-bottom:10px}footer{margin-top:10px;color:var(--muted);font-size:11px;line-height:1.5}@media(max-width:780px){.protocols{grid-template-columns:1fr}header{align-items:flex-start}}@media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 <main>
-<header><div><div class="eyebrow">Bike computer / live</div><h1>La bici, in tempo reale.</h1><span class="muted">Cardio, movimento, luci e trasmissione.</span></div><div id="connection" class="pill">Connessione…</div></header>
+<header><div><div class="eyebrow">Bike computer / live</div><h1>Bike telemetry</h1></div><div id="connection" class="pill">Connecting…</div></header>
 <div id="banner" class="banner" role="status"></div>
-<div class="heroes">
- <div class="hero"><span class="muted">Frequenza cardiaca</span><div class="number"><span id="hr">—</span><span class="unit">bpm</span></div></div>
- <div class="hero"><span class="muted">Velocità</span><div class="number"><span id="speed">—</span><span class="unit">km/h</span></div></div>
- <div class="hero"><span class="muted">Cadenza</span><div class="number"><span id="cadence">—</span><span class="unit">rpm</span></div></div>
+<div class="protocols">
+ <section class="protocol"><div class="protocol-head"><h2>BLE</h2><span>Bluetooth Low Energy</span></div><div id="ble-cards" class="cards"></div></section>
+ <section class="protocol"><div class="protocol-head"><h2>ANT+</h2><span>USB dongle</span></div><div id="ant-cards" class="cards"></div></section>
 </div>
-<div class="grid" id="sections"></div>
-<footer><div id="recording">In attesa della raccolta…</div><div id="wheel"></div><div>Giallo: valore appena cambiato · Il tempo a destra indica l'età della lettura.</div><div>SRAM: tensioni sperimentali; marcia non ancora decodificata. I valori mancanti sono indicati con —.</div></footer>
+<footer><div id="recording">Waiting for collection…</div><div id="wheel"></div><div>Yellow: recently changed value · Time on the right: reading age · —: no recent data.</div></footer>
 </main>
 <script>
 const keys=['cardio','duo','front','rear','sram'];
-const names={cardio:'COOSPO H808S',duo:'DuoTrap S',front:'Luce anteriore · Ion Pro RT',rear:'Luce posteriore · Flare RT',sram:'SRAM Force AXS · 2×12'};
-const cards={};
-function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n}
-for(const key of keys){const card=el('section','sensor'),head=el('div','sensor-head'),title=el('h2','',names[key]),signal=el('span','signal');head.append(title,signal);const status=el('div','status','In attesa…'),table=el('table','fields'),empty=el('div','empty','Nessuna lettura ricevuta'),error=el('div','error');card.append(head,status,table,empty,error);document.querySelector('#sections').append(card);cards[key]={card,signal,status,table,empty,error,rows:new Map()}}
+const names={cardio:'COOSPO H808S',duo:'DuoTrap S',front:'Ion Pro RT · front',rear:'Flare RT · rear',sram:'SRAM Force AXS · 2×12'};
+const cards={ble:{},ant:{}};
+function el(tag,cls,value){const n=document.createElement(tag);if(cls)n.className=cls;if(value!==undefined)n.textContent=value;return n}
+for(const protocol of ['ble','ant'])for(const key of keys){const card=el('section','sensor'),head=el('div','sensor-head'),title=el('h3','',names[key]),metrics=el('span','metrics'),signal=el('span','signal');head.append(title,metrics);const status=el('div','status',protocol==='ant'&&key!=='cardio'?'ANT+ profile to be added':'Waiting…'),table=el('table','fields'),error=el('div','error');card.append(head,status,signal,table,error);document.querySelector(`#${protocol}-cards`).append(card);cards[protocol][key]={card,key,metrics,signal,status,table,error,rows:new Map()}}
 let last=null,lastAt=0,online=false;
 const fmt=v=>v==null?'—':v.toFixed(1);
-function draw(){
- const elapsed=(performance.now()-lastAt)/1000,active=online&&last&&last.state==='running'&&elapsed<4;
- const badge=document.querySelector('#connection');badge.textContent=active?'● Live':online?'Raccolta non attiva':'Connessione interrotta';badge.className='pill '+(active?'ok':'warn');
- const banner=document.querySelector('#banner');const error=!online?'Collegamento al Raspberry interrotto. Riconnessione automatica…':last?.error||(last?.state==='stopped'?'La raccolta è stata arrestata.':'');banner.textContent=error;banner.style.display=error?'block':'none';
- const sections=last?.sections||{};
- for(const key of keys){const s=sections[key],c=cards[key];if(!s)continue;c.status.textContent=s.status;c.error.textContent=s.error||'';c.signal.textContent=s.rssi==null?'':`${s.rssi} dBm · annuncio ${Math.floor(s.advertisement_age_s+elapsed)} s fa`;c.empty.hidden=s.fields.length>0;c.card.classList.toggle('stale',!active);
-  const labels=new Set(s.fields.map(f=>f.label));for(const [label,row] of c.rows){if(!labels.has(label)){row.value.parentElement.remove();c.rows.delete(label)}}
-  for(const f of s.fields){let row=c.rows.get(f.label);if(!row){const tr=el('tr'),label=el('td','',f.label),value=el('td'),age=el('td');tr.append(label,value,age);c.table.append(tr);row={value,age};c.rows.set(f.label,row)}row.value.textContent=f.value;row.value.className=f.changed&&active&&elapsed<2?'changed':'';row.age.textContent=`${Math.floor(f.age_s+elapsed)} s fa`}
- }
- const hr=sections.cardio?.fields.find(f=>f.label==='Frequenza');document.querySelector('#hr').textContent=active&&sections.cardio.status==='connesso'&&hr&&hr.age_s+elapsed<10?hr.value.replace(/\s*bpm$/,''):'—';
- document.querySelector('#speed').textContent=active?fmt(sections.duo?.speed_kmh):'—';document.querySelector('#cadence').textContent=active?fmt(sections.duo?.cadence_rpm):'—';
- document.querySelector('#recording').textContent=last?.log?`${active?'Registrazione':'Ultimo log'}: ${last.log}`:'In attesa della raccolta…';
- if(last?.wheel_circumference_m)document.querySelector('#wheel').textContent=`Circonferenza ruota impostata: ${last.wheel_circumference_m.toFixed(3)} m · Zero dopo 5 s senza impulsi; — se mancano dati recenti.`;
+function renderSection(c,s,elapsed,active){if(!s)return;c.status.textContent=s.status||'Waiting…';c.error.textContent=s.error||'';c.signal.textContent=s.rssi==null?'':`${s.rssi} dBm · ${Math.floor((s.advertisement_age_s||0)+elapsed)} s`;
+ const fields=(s.fields||[]).filter(f=>!(c.key==='cardio'&&f.label==='Heart rate'));const labels=new Set(fields.map(f=>f.label));for(const [label,row] of c.rows)if(!labels.has(label)){row.value.parentElement.remove();c.rows.delete(label)}
+ for(const f of fields){let row=c.rows.get(f.label);if(!row){const tr=el('tr'),label=el('td','',f.label),value=el('td'),age=el('td');tr.append(label,value,age);c.table.append(tr);row={value,age};c.rows.set(f.label,row)}row.value.textContent=f.value;row.value.className=f.changed&&active&&elapsed<2?'changed':'';row.age.textContent=`${Math.floor((f.age_s||0)+elapsed)} s`}
+ c.card.classList.toggle('stale',!active)}
+function draw(){const elapsed=(performance.now()-lastAt)/1000,active=online&&last&&last.state==='running'&&elapsed<4;
+ const badge=document.querySelector('#connection');badge.textContent=active?'● Live':online?'Collector inactive':'Disconnected';badge.className='pill '+(active?'ok':'warn');
+ const banner=document.querySelector('#banner'),error=!online?'Connection to Raspberry lost. Reconnecting…':last?.error||(last?.state==='stopped'?'Collection stopped.':'');banner.textContent=error;banner.style.display=error?'block':'none';
+ const ble=last?.sections_ble||last?.sections||{},ant=last?.sections_ant||{};
+ for(const key of keys){renderSection(cards.ble[key],ble[key],elapsed,active);renderSection(cards.ant[key],ant[key],elapsed,online)}
+ const bpm=(sections)=>{const s=sections.cardio,f=s?.fields?.find(f=>f.label==='Heart rate');return s?.status==='connected'&&f&&f.age_s+elapsed<10?f.value.replace(/\s*bpm$/,''):'—'};
+ cards.ble.cardio.metrics.textContent=`${active?bpm(ble):'—'} bpm`;
+ cards.ant.cardio.metrics.textContent=`${online?bpm(ant):'—'} bpm`;
+ cards.ble.duo.metrics.textContent=`${active?fmt(ble.duo?.speed_kmh):'—'} km/h · ${active?fmt(ble.duo?.cadence_rpm):'—'} rpm`;
+ document.querySelector('#recording').textContent=last?.log?`${active?'Recording':'Last log'}: ${last.log}`:'Waiting for collection…';
+ if(last?.wheel_circumference_m)document.querySelector('#wheel').textContent=`Wheel circumference: ${last.wheel_circumference_m.toFixed(3)} m`;
 }
 async function poll(){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),3000);try{const response=await fetch('/api/state',{cache:'no-store',signal:controller.signal});if(!response.ok)throw new Error(response.status);last=await response.json();lastAt=performance.now();online=true}catch(e){online=false}finally{clearTimeout(timer);draw();setTimeout(poll,500)}}
 poll();setInterval(()=>{if(last)draw()},1000);

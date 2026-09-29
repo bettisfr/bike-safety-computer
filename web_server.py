@@ -1,4 +1,4 @@
-"""Flask UI with one shared BLE collector and automatic JSONL recording."""
+"""Flask UI with shared BLE/ANT+ collectors and automatic JSONL recording."""
 import argparse
 import asyncio
 import fcntl
@@ -13,7 +13,8 @@ from pathlib import Path
 from flask import Flask, jsonify, send_file
 from werkzeug.serving import make_server
 
-from bike_telemetry import BikeTelemetry, TelemetryConfig
+from ble_sensors import BikeTelemetry, TelemetryConfig
+from ant_sensors import ANTHeartRate
 
 ROOT = Path(__file__).resolve().parent
 
@@ -25,12 +26,15 @@ class Collector:
         self.state = {"state": "starting", "sections": {}, "error": None}
         self.loop = None
         self.telemetry = None
+        self.ant = ANTHeartRate()
         self.closing = threading.Event()
         self.thread = threading.Thread(target=self.worker, name="bike-ble", daemon=True)
 
     def snapshot(self):
         with self.mutex:
-            return self.state
+            state = dict(self.state)
+        state["sections_ant"] = self.ant.snapshot()
+        return state
 
     def publish(self, state):
         # Replace complete snapshots: request threads never access mutable BLE state.
@@ -52,15 +56,15 @@ class Collector:
                                for label, (value, updated) in section.visible_fields().items()],
                 }
             fresh = (app.duo_packet_at is not None and now - app.duo_packet_at < 10
-                     and app.sections["duo"].status == "connesso")
+                     and app.sections["duo"].status == "connected")
             wheel = app.wheel.display_rate() if fresh else None
             crank = app.crank.display_rate() if fresh else None
             sections["duo"]["speed_kmh"] = wheel * self.config.wheel_circumference * 3.6 if wheel is not None else None
             sections["duo"]["cadence_rpm"] = crank * 60 if crank is not None else None
             self.publish({"state": "running", "error": None, "timestamp": time.time(),
-                          "log": getattr(app, "log_path", Path("in apertura")).name,
+                          "log": getattr(app, "log_path", Path("opening")).name,
                           "wheel_circumference_m": self.config.wheel_circumference,
-                          "sections": sections})
+                          "sections": sections, "sections_ble": sections})
             await app.pause(0.25)
 
     async def collect(self):
@@ -89,6 +93,7 @@ class Collector:
 
     def close(self):
         self.closing.set()
+        self.ant.close()
         if self.loop and self.telemetry and not self.loop.is_closed():
             try:
                 self.loop.call_soon_threadsafe(self.telemetry.stop.set)
@@ -127,13 +132,13 @@ def main():
     parser.add_argument("--log", type=Path)
     args = parser.parse_args()
     if not 0.1 < args.wheel_circumference < 5:
-        parser.error("Circonferenza tra 0.1 e 5 m")
+        parser.error("Wheel circumference must be between 0.1 and 5 m")
     if not math.isfinite(args.poll_interval) or args.poll_interval < 1:
-        parser.error("Intervallo luci finito e almeno 1 s")
+        parser.error("Light poll interval must be finite and at least 1 s")
     if not math.isfinite(args.sram_interval) or args.sram_interval < 0.1:
-        parser.error("Intervallo SRAM finito e almeno 0.1 s")
+        parser.error("SRAM interval must be finite and at least 0.1 s")
     if not 1 <= args.port <= 65535:
-        parser.error("Porta tra 1 e 65535")
+        parser.error("Port must be between 1 and 65535")
     (ROOT / "data").mkdir(exist_ok=True)
     diagnostic = ROOT / "data" / datetime.now(timezone.utc).strftime("web-%Y%m%dT%H%M%S-%fZ.log")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
@@ -143,7 +148,7 @@ def main():
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            parser.exit(1, "Telemetria già attiva: chiudi la dashboard o ferma bike-telemetry.service.\n")
+            parser.exit(1, "Telemetry already running: close the dashboard or stop bike-telemetry.service.\n")
         collector = Collector(TelemetryConfig(wheel_circumference=args.wheel_circumference,
                               poll_interval=args.poll_interval, sram_interval=args.sram_interval,
                               log=args.log))
@@ -153,6 +158,7 @@ def main():
             raise KeyboardInterrupt
 
         signal.signal(signal.SIGTERM, stop)
+        collector.ant.start()
         collector.thread.start()
         logging.info("Bike web: http://%s:%s", args.host, args.port)
         try:

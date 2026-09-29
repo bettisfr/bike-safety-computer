@@ -1,4 +1,4 @@
-"""Terminal display for bike_telemetry: live sections, colors and JSONL logging."""
+"""Terminal display for BLE sensors: live sections, colors and JSONL logging."""
 import argparse
 import asyncio
 import curses
@@ -10,34 +10,34 @@ import signal
 import sys
 import time
 from pathlib import Path
-from bike_telemetry import BikeTelemetry
+from ble_sensors import BikeTelemetry
 
 
 class Dashboard(BikeTelemetry):
     def lines(self):
         now = time.monotonic()
-        lines = ["BIKE · TELEMETRIA LIVE    " + time.strftime("%H:%M:%S"),
-                 "q / Ctrl+C: esci · ↑↓ / PgUp PgDn: scorri · età a destra = ultima lettura",
+        lines = ["BIKE · LIVE TELEMETRY    " + time.strftime("%H:%M:%S"),
+                 "q / Ctrl+C: quit · ↑↓ / PgUp PgDn: scroll · age on right = last reading",
                  self.banner, ""]
         for key, section in self.sections.items():
             lines.append(f"── {section.name} ── {section.status}")
             if section.rssi is not None:
-                lines.append(f"  Segnale ultimo annuncio: {section.rssi} dBm · {now - section.seen:.0f} s fa")
+                lines.append(f"  Last advertisement: {section.rssi} dBm · {now - section.seen:.0f} s ago")
             if key == "duo":
-                fresh = self.duo_packet_at is not None and now - self.duo_packet_at < 10 and section.status == "connesso"
+                fresh = self.duo_packet_at is not None and now - self.duo_packet_at < 10 and section.status == "connected"
                 wheel = self.wheel.display_rate() if fresh else None
                 crank = self.crank.display_rate() if fresh else None
                 speed = f"{wheel * self.args.wheel_circumference * 3.6:.1f} km/h" if wheel is not None else "--"
                 cadence = f"{crank * 60:.1f} rpm" if crank is not None else "--"
-                lines.extend([f"  Velocità: {speed}    Cadenza: {cadence}",
-                              f"  Circonferenza impostata: {self.args.wheel_circumference:.3f} m; 0 dopo 5 s senza impulsi"])
+                lines.extend([f"  Speed: {speed}    Cadence: {cadence}",
+                              f"  Wheel circumference: {self.args.wheel_circumference:.3f} m; zero after 5 s without pulses"])
             visible = section.visible_fields()
             for label, (value, updated) in visible.items():
-                lines.append(f"  {label}: {value}  [{now - updated:.0f} s fa]")
+                lines.append(f"  {label}: {value}  [{now - updated:.0f} s ago]")
             if not visible:
-                lines.append("  Nessuna lettura ricevuta")
+                lines.append("  No readings received")
             if section.error:
-                lines.append("  Avviso: " + section.error.replace("\n", " "))
+                lines.append("  Warning: " + section.error.replace("\n", " "))
             lines.append("")
         return lines
 
@@ -79,9 +79,9 @@ class Dashboard(BikeTelemetry):
                         if curses.has_colors():
                             if line.startswith("──"):
                                 style = curses.color_pair(1) | curses.A_BOLD
-                            elif "Avviso:" in line or "NON DISPONIBILE" in line:
+                            elif "Warning:" in line or "unavailable" in line:
                                 style = curses.color_pair(4)
-                            elif "Velocità:" in line:
+                            elif "Speed:" in line:
                                 style = curses.color_pair(2) | curses.A_BOLD
                             else:
                                 for section in self.sections.values():
@@ -92,7 +92,7 @@ class Dashboard(BikeTelemetry):
                     except curses.error:
                         pass
                 try:
-                    screen.addnstr(height - 1, 0, f"q: esci | scorri ↑↓ | righe {self.offset + 1}-{min(self.offset + height - 1, len(lines))}/{len(lines)}", max(1, width - 1))
+                    screen.addnstr(height - 1, 0, f"q: quit | scroll ↑↓ | rows {self.offset + 1}-{min(self.offset + height - 1, len(lines))}/{len(lines)}", max(1, width - 1))
                 except curses.error:
                     pass
                 screen.refresh()
@@ -118,23 +118,23 @@ async def run(app, screen, headless=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wheel-circumference", type=float, default=2.136,
-                        help="Metri per giro ruota; default 2.136, ipotesi 700x28C")
-    parser.add_argument("--poll-interval", type=float, default=10, help="Pausa tra cicli luci/SRAM in secondi")
-    parser.add_argument("--sram-interval", type=float, default=0.5, help="Pausa tra letture SRAM, secondi (default 0.5)")
-    parser.add_argument("--raw", action="store_true", help="Mostra anche i pacchetti esadecimali")
-    parser.add_argument("--plain", action="store_true", help="Stampa istantanee senza curses")
-    parser.add_argument("--headless", action="store_true", help="Solo raccolta e log, senza schermo")
-    parser.add_argument("--log", type=Path, help="Percorso JSONL; default data/telemetry-DATA.jsonl")
+                        help="Meters per wheel revolution; default 2.136 for assumed 700x28C")
+    parser.add_argument("--poll-interval", type=float, default=10, help="Pause between light polls, in seconds")
+    parser.add_argument("--sram-interval", type=float, default=0.5, help="Pause between SRAM reads, in seconds")
+    parser.add_argument("--raw", action="store_true", help="Show hexadecimal packets")
+    parser.add_argument("--plain", action="store_true", help="Print snapshots without curses")
+    parser.add_argument("--headless", action="store_true", help="Collect and log without a display")
+    parser.add_argument("--log", type=Path, help="JSONL path; defaults to data/telemetry-TIMESTAMP.jsonl")
     args = parser.parse_args()
     if not 0.1 < args.wheel_circumference < 5 or not math.isfinite(args.poll_interval) or args.poll_interval < 1:
-        parser.error("Circonferenza tra 0.1 e 5 m; intervallo polling finito e almeno 1 s")
+        parser.error("Wheel circumference must be 0.1–5 m; poll interval must be finite and at least 1 s")
     if not math.isfinite(args.sram_interval) or args.sram_interval < 0.1:
-        parser.error("Intervallo SRAM finito e almeno 0.1 s")
+        parser.error("SRAM interval must be finite and at least 0.1 s")
     with (Path(__file__).resolve().parent / ".telemetry.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            parser.exit(1, "Telemetria già attiva. Ferma prima l'altra istanza o bike-telemetry.service.\n")
+            parser.exit(1, "Telemetry already running. Stop the other instance or bike-telemetry.service.\n")
         diagnostic_dir = Path(__file__).resolve().parent / "data"
         diagnostic_dir.mkdir(parents=True, exist_ok=True)
         diagnostic_path = diagnostic_dir / datetime.now(timezone.utc).strftime("diagnostics-%Y%m%dT%H%M%S-%fZ.log")
@@ -150,7 +150,7 @@ def main():
         except KeyboardInterrupt:
             pass
         if hasattr(app, "log_path"):
-            print(f"Log salvato: {app.log_path}")
+            print(f"Log saved: {app.log_path}")
 
 
 if __name__ == "__main__":

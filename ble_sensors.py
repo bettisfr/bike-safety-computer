@@ -1,0 +1,855 @@
+# SPDX-License-Identifier: MPL-2.0
+"""BLE sensor collection and maintenance commands for this bike.
+
+Live collection is read-only; explicit CLI commands can control lights or bond SRAM.
+"""
+import argparse
+import asyncio
+import os
+import secrets
+import json
+import logging
+import time
+from pathlib import Path
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from bleak import BleakClient, BleakScanner
+from Crypto.Cipher import AES
+
+LOG = logging.getLogger("bike.telemetry")
+
+# SRAMBond code below is adapted from Gabor Wnuk's sram-axs (copyright 2026)
+# under the Mozilla Public License 2.0.
+# https://github.com/GaborWnuk/sram-axs/blob/main/packages/axs-core/src/axs/srambond-bond.ts
+# https://mozilla.org/MPL/2.0/
+MODE = "71261001-3692-ae93-e711-472ba41689c9"
+LIGHTS = {"front": "Ion Pro RT", "rear": "Flare RT"}
+BOND = "d905ee52" + "-90aa-4c7c-b036-1e01fb8eb7ee"
+MODULUS = (1 << 128) - 713
+SRAM_RECORD_UUID = "d9050003-90aa-4c7c-b036-1e01fb8eb7ee"
+
+BATTERY = "00002a19-0000-1000-8000-00805f9b34fb"
+CSC = "00002a5b-0000-1000-8000-00805f9b34fb"
+BASE = "-90aa-4c7c-b036-1e01fb8eb7ee"
+READABLE = {BATTERY, *(f"d905{s}{BASE}" for s in
+              ("fe54", "fe56", "fe58", "fff1", "fff2", "000a", "0002", "0003", "000b", "0024", "0025"))}
+DEVICES = {
+    "cardio": ("CARDIO · COOSPO H808S", "D5:C5:6C:0E:23:41"),
+    "duo": ("DUOTRAP S · wheel and crank", "CA:E3:18:C1:45:76"),
+    "front": ("FRONT LIGHT · Ion Pro RT", "D9:80:3C:1F:06:45"),
+    "rear": ("REAR LIGHT · Flare RT", "CC:7E:7A:54:2C:D9"),
+    "sram": ("SRAM FORCE AXS · 2x12", "D7:86:54:78:31:79"),
+}
+HR_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
+
+@dataclass
+class TelemetryConfig:
+    wheel_circumference: float = 2.136
+    poll_interval: float = 10
+    sram_interval: float = 0.5
+    raw: bool = False
+    log: Path | None = None
+
+def decode_hr(data):
+    """Decode flags, 8/16-bit bpm, optional energy and RR intervals."""
+    if not data:
+        raise ValueError("Empty measurement")
+    flags = data[0]
+    offset = 1
+
+    def take(size):
+        nonlocal offset
+        if offset + size > len(data):
+            raise ValueError("Truncated measurement")
+        value = int.from_bytes(data[offset:offset + size], "little")
+        offset += size
+        return value
+
+    result = {"bpm": take(2 if flags & 1 else 1),
+              "contact": bool(flags & 2) if flags & 4 else None}
+    if flags & 8:
+        result["energy_kj"] = take(2)
+    result["rr_ms"] = []
+    if flags & 16:
+        while offset < len(data):
+            result["rr_ms"].append(take(2) * 1000 / 1024)
+    return result
+
+
+
+class Section:
+    def __init__(self, name, address):
+        self.name, self.address = name, address
+        self.status = "waiting"
+        self.error = ""
+        self.rssi = None
+        self.seen = None
+        self.fields = {}
+        self.changed = {}
+
+    def put(self, key, value):
+        value = str(value)
+        if key not in self.fields or self.fields[key][0] != value:
+            self.changed[key] = time.monotonic()
+        self.fields[key] = (value, time.monotonic())
+
+    def visible_fields(self):
+        """Omit absent measurements from UIs; keep complete acquisition logs."""
+        missing = ("not transmitted", "unavailable", "unsupported",
+                   "description unavailable")
+        return {key: item for key, item in self.fields.items()
+                if not item[0].strip().lower().startswith(missing)}
+
+
+class Rotation:
+    def __init__(self, bits):
+        self.modulus = 1 << bits
+        self.previous = None
+        self.rate = None
+        self.last_change = None
+        self.started = time.monotonic()
+        self.count = None
+        self.event = None
+        self.reset = False
+
+    def update(self, count, event):
+        now = time.monotonic()
+        self.count, self.event = count, event
+        if self.previous is None:
+            self.previous = (count, event, now)
+            return
+        old_count, old_event, old_time = self.previous
+        if count == old_count:
+            return
+        turns = (count - old_count) % self.modulus
+        ticks = (event - old_event) % 65536
+        # The event clock wraps every 64 s; do not infer a rate across a gap.
+        elapsed = now - old_time
+        rate = turns * 1024 / ticks if ticks else None
+        self.reset = elapsed >= 64 or rate is None or rate > 30
+        self.rate = None if self.reset else rate
+        self.last_change = now
+        self.previous = (count, event, now)
+
+    def display_rate(self):
+        if self.previous is None:
+            return None
+        # No wheel/crank pulse is an inactivity indication, not an exact stop sensor.
+        if time.monotonic() - (self.last_change or self.started) > 5:
+            return 0.0
+        return self.rate
+
+
+def decode_csc(data):
+    if not data:
+        raise ValueError("Empty CSC packet")
+    offset, result = 1, {}
+    for name, flag, size in (("wheel", 1, 4), ("crank", 2, 2)):
+        if data[0] & flag:
+            if len(data) < offset + size + 2:
+                raise ValueError("Incomplete CSC packet")
+            result[name] = (int.from_bytes(data[offset:offset + size], "little"),
+                            int.from_bytes(data[offset + size:offset + size + 2], "little"))
+            offset += size + 2
+    return result
+
+
+class BikeTelemetry:
+    def __init__(self, args=None, on_event=None):
+        args = args or TelemetryConfig()
+        self.on_event = on_event
+        self.args = args
+        self.sections = {key: Section(*value) for key, value in DEVICES.items()}
+        self.devices = {}
+        self.light_modes = {}
+        self.light_descriptors = set()
+        self.stop = asyncio.Event()
+        self.connect_lock = asyncio.Lock()
+        self.banner = ""
+        self.wheel = Rotation(32)
+        self.crank = Rotation(16)
+        self.duo_packet_at = None
+        self.offset = 0
+        self.log = None
+        self.log_error = None
+
+    def advertisement(self, device, adv):
+        for key, section in self.sections.items():
+            if device.address.upper() == section.address:
+                self.devices[key] = device
+                section.rssi, section.seen = adv.rssi, time.monotonic()
+
+    def record(self, key, values, data=None, raw=None):
+        section = self.sections[key]
+        for label, value in values.items():
+            section.put(label, value)
+        event = {"timestamp": datetime.now(timezone.utc).isoformat(),
+                 "monotonic_s": time.monotonic(), "device": key,
+                 "address": section.address, "values": values, "data": data,
+                 "raw_hex": raw.hex() if raw is not None else None}
+        if self.log:
+            try:
+                self.log.write(json.dumps(event) + "\n")
+            except OSError as exc:
+                self.log_error = exc
+                self.stop.set()
+                raise
+        if self.on_event:
+            self.on_event(event)
+
+    async def read(self, client, uuid):
+        return bytes(await asyncio.wait_for(client.read_gatt_char(uuid), 5))
+
+    async def battery(self, key, client):
+        if client.services.get_characteristic(BATTERY):
+            try:
+                raw = await self.read(client, BATTERY)
+                self.record(key, {"Battery": f"{raw[0]} %" if len(raw) == 1 and raw[0] <= 100 else "unavailable"}, data={"battery_pct": raw[0] if len(raw) == 1 and raw[0] <= 100 else None}, raw=raw)
+            except Exception as exc:
+                self.sections[key].error = f"Battery: {exc}"
+
+    async def connect(self, key):
+        section = self.sections[key]
+        # Never reuse a BLEDevice retained by an earlier discovery: BlueZ can
+        # remove/recreate its D-Bus object. Serialize discovery AND connection.
+        section.status = "queued · waiting for BLE adapter"
+        async with self.connect_lock:
+            if self.stop.is_set():
+                return None
+            section.status = "scanning BLE…"
+
+            def matches(device, adv):
+                self.advertisement(device, adv)
+                return device.address.upper() == section.address
+
+            device = await BleakScanner.find_device_by_filter(matches, timeout=6)
+            if device is None or self.stop.is_set():
+                self.devices.pop(key, None)
+                return None
+            client = BleakClient(device, timeout=90)
+            try:
+                section.status = "connecting and reading services… (first time: up to 90 s)"
+                await asyncio.wait_for(client.connect(), 95)
+                section.status, section.error = "connected", ""
+                LOG.info("Connected %s %s", key, section.address)
+                return client
+            except BaseException:
+                self.devices.pop(key, None)
+                await self.disconnect(client)
+                raise
+
+    async def disconnect(self, client):
+        if client:
+            try:
+                await asyncio.wait_for(client.disconnect(), 5)
+            except Exception:
+                pass
+
+    async def pause(self, seconds):
+        try:
+            await asyncio.wait_for(self.stop.wait(), seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    async def stream(self, key):
+        section = self.sections[key]
+        while not self.stop.is_set():
+            client = None
+            try:
+                client = await self.connect(key)
+                if client is None:
+                    section.status = "searching · wake the sensor"
+                    await self.pause(2)
+                    continue
+                await self.battery(key, client)
+                if key == "duo":
+                    self.wheel, self.crank = Rotation(32), Rotation(16)
+                    self.duo_packet_at = None
+                last_packet = time.monotonic()
+
+                def received(_, payload):
+                    nonlocal last_packet
+                    try:
+                        raw = bytes(payload)
+                        if key == "cardio":
+                            values = decode_hr(raw)
+                            display = {"Heart rate": f"{values['bpm']} bpm",
+                                       "Contact": {True: "yes", False: "no", None: "unsupported"}[values['contact']],
+                                       "RR intervals": ", ".join(f"{v:.0f} ms" for v in values['rr_ms']) or "not transmitted",
+                                       "Energy": f"{values['energy_kj']} kJ" if 'energy_kj' in values else "not transmitted"}
+                        else:
+                            values = decode_csc(raw)
+                            display = {}
+                            for name, rotation in (("wheel", self.wheel), ("crank", self.crank)):
+                                if name in values:
+                                    rotation.update(*values[name])
+                                    label = "Wheel" if name == "wheel" else "Crank"
+                                    display[label + " · cumulative revolutions"] = rotation.count
+                                    display[label + " · event time"] = f"{rotation.event} /1024 s (modulo 64 s)"
+                            self.duo_packet_at = time.monotonic()
+                        if self.args.raw:
+                            display["BLE packet"] = raw.hex()
+                        if key == "duo":
+                            wheel, crank = self.wheel.display_rate(), self.crank.display_rate()
+                            values.update(speed_kmh=wheel * self.args.wheel_circumference * 3.6 if wheel is not None else None,
+                                          cadence_rpm=crank * 60 if crank is not None else None,
+                                          wheel_circumference_m=self.args.wheel_circumference)
+                        self.record(key, display, data=values, raw=raw)
+                        last_packet = time.monotonic()
+                        section.error = ""
+                    except Exception as exc:
+                        section.error = f"Decode: {exc}"
+
+                await client.start_notify(HR_UUID if key == "cardio" else CSC, received)
+                battery_at = time.monotonic()
+                while client.is_connected and not self.stop.is_set():
+                    if time.monotonic() - last_packet > 35:
+                        section.error = "No packets for 35 s; reconnecting"
+                        break
+                    if time.monotonic() - battery_at > 60:
+                        await self.battery(key, client)
+                        battery_at = time.monotonic()
+                    await self.pause(1)
+            except Exception as exc:
+                section.error = f"{type(exc).__name__}: {exc}"
+                LOG.exception("Stream %s failed", key)
+            finally:
+                await self.disconnect(client)
+                if client is not None:
+                    section.status = "disconnected · retrying"
+                elif section.error:
+                    section.status = "connection failed · retrying"
+            await self.pause(3)
+
+    async def light(self, key, client):
+        # Publish useful readings immediately; descriptors are a static label table.
+        await self.battery(key, client)
+        modes = self.light_modes.setdefault(key, {})
+
+        async def mode_reading():
+            raw = await self.read(client, MODE)
+            mode = raw[0] if len(raw) == 1 else None
+            self.record(key, {"Mode": modes.get(mode, "description unavailable"),
+                              "Mode code": mode if mode is not None else raw.hex()},
+                        data={"mode": mode, "label": modes.get(mode)}, raw=raw)
+
+        await mode_reading()
+        for service in client.services:
+            for char in service.characteristics:
+                if char.uuid.startswith("712611") and "read" in char.properties:
+                    # Keep successfully decoded descriptors for subsequent polls.
+                    if (key, char.uuid) in self.light_descriptors:
+                        continue
+                    try:
+                        raw = await self.read(client, char.uuid)
+                        if len(raw) >= 4:
+                            modes[raw[0]] = raw[3:].decode("utf-8", errors="replace").rstrip("\x00")
+                            self.light_descriptors.add((key, char.uuid))
+                    except Exception:
+                        LOG.exception("Mode descriptor %s %s failed", key, char.uuid)
+        await mode_reading()
+
+    async def sram(self, client):
+        raw = await self.read(client, "d9050003" + BASE)
+        records = extract_sram(raw)
+        labels = {0: "Left shifter", 1: "Right shifter", 128: "Front derailleur", 129: "Rear derailleur"}
+        values = {"Gear": "unavailable via BLE", "Drivetrain": "35/48 · 10-11-12-13-14-15-17-19-21-24-28-33"}
+        for label in labels.values():
+            values[label + " · battery*"] = "unavailable"
+            values[label + " · serial / status"] = "unavailable"
+        for record in records:
+            if not record['product_id_candidate']:
+                continue
+            label = labels.get(record['role_raw'], f"Component {record['role_raw']}")
+            voltage = record['voltage_v_hypothesis']
+            values[label + " · battery*"] = f"{voltage:.3f} V" if voltage is not None and record['status_raw'] == 3 else "unavailable"
+            values[label + " · serial / status"] = f"{record['serial']} / {record['status_raw']}"
+            if record['role_raw'] == 129:
+                payload = bytes.fromhex(record['raw_hex'])
+                values["Shift counter · low byte"] = payload[20]
+                values["Time counter* · uint16"] = int.from_bytes(payload[16:18], "little")
+        values["* Interpretation"] = "Voltage and time counter experimental; left/right order from SDK"
+        if self.args.raw:
+            values["Dynamic BLE record"] = raw.hex()
+        self.record("sram", values, data={"records": records, "gear": None}, raw=raw)
+
+    async def poll_sram(self):
+        """Keep SRAM connected; light discovery never gates an established read."""
+        section = self.sections["sram"]
+        while not self.stop.is_set():
+            client = None
+            try:
+                client = await self.connect("sram")
+                if client is None:
+                    section.status = "searching · wake the derailleur"
+                else:
+                    previous = None
+                    while client.is_connected and not self.stop.is_set():
+                        started = time.monotonic()
+                        await self.sram(client)
+                        finished = time.monotonic()
+                        section.error = ""
+                        timing = {"BLE read duration": f"{finished - started:.2f} s"}
+                        if previous is not None:
+                            timing["Actual read interval"] = f"{finished - previous:.2f} s"
+                        for label, value in timing.items():
+                            section.put(label, value)
+                        previous = finished
+                        section.status = "connected · continuous reads"
+                        await self.pause(getattr(self.args, "sram_interval", 0.5))
+            except Exception as exc:
+                section.error = f"{type(exc).__name__}: {exc}"
+                section.status = "connection failed · retrying"
+                LOG.exception("SRAM continuous read failed")
+            finally:
+                await self.disconnect(client)
+                if client is not None and not section.error:
+                    section.status = "disconnected · retrying"
+            await self.pause(3)
+
+    async def poll_others(self):
+        # One light at a time, alongside persistent HR, CSC and SRAM connections.
+        while not self.stop.is_set():
+            for key in ("front", "rear"):
+                if self.stop.is_set():
+                    break
+                client = None
+                section = self.sections[key]
+                try:
+                    client = await self.connect(key)
+                    if client is None:
+                        section.status = "searching · wake the device"
+                        continue
+                    await self.light(key, client)
+                    section.status = "reading acquired · polling"
+                except Exception as exc:
+                    section.status, section.error = "unreachable", f"{type(exc).__name__}: {exc}"
+                    LOG.exception("Read %s failed", key)
+                finally:
+                    await self.disconnect(client)
+            await self.pause(self.args.poll_interval)
+
+    async def run(self):
+        """Collect until stop.set(); expose sections and synchronous on_event callbacks.
+
+        Every run records JSONL, including numeric data and raw measurement bytes.
+        Callbacks must be fast and must not block the asyncio event loop.
+        """
+        path = self.args.log or Path(__file__).resolve().parent / "data" / (
+            datetime.now(timezone.utc).strftime("telemetry-%Y%m%dT%H%M%S-%fZ.jsonl"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path = path
+        self.banner = f"Log: {path}"
+        tasks = []
+        with path.open("a", buffering=1) as self.log:
+            try:
+                tasks = [asyncio.create_task(self.stream("cardio")),
+                         asyncio.create_task(self.stream("duo")),
+                         asyncio.create_task(self.poll_sram()),
+                         asyncio.create_task(self.poll_others()),
+                         asyncio.create_task(self.stop.wait())]
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    task.result()
+                if self.log_error:
+                    raise RuntimeError(f"Recording stopped: {self.log_error}") from self.log_error
+            finally:
+                self.stop.set()
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self.log = None
+
+def extract_sram(raw):
+    if len(raw) < 6 or raw[0] != 1 or len(raw) != 6 + raw[1] * 24:
+        raise ValueError("Unrecognized record layout; expected version 1, count and 24-byte records")
+    records = []
+    for index in range(raw[1]):
+        offset = 6 + index * 24
+        record = raw[offset:offset + 24]
+        value = int.from_bytes(record[8:10], "little")
+        product = int.from_bytes(record[1:3], "little")
+        records.append({
+            "offset": offset, "raw_hex": record.hex(),
+            "role_raw": record[0], "product_id_candidate": product,
+            "serial": int.from_bytes(record[3:7], "little"),
+            "status_raw": record[7], "field_u16_raw": value,
+            "voltage_v_hypothesis": value / 1000 if product and value else None,
+            "battery_percent": None,
+        })
+    return records
+
+
+async def control(name, action):
+    device = await BleakScanner.find_device_by_filter(
+        lambda d, adv: (adv.local_name or d.name) == name, timeout=15)
+    if device is None:
+        raise RuntimeError(f"{name}: not found")
+    async with BleakClient(device, timeout=20) as client:
+        modes = {}
+        for service in client.services:
+            for char in service.characteristics:
+                if char.uuid.startswith("712611") and "read" in char.properties:
+                    raw = await asyncio.wait_for(client.read_gatt_char(char), 5)
+                    if len(raw) >= 4:
+                        modes[raw[0]] = raw[3:].decode("utf-8", errors="replace").rstrip("\x00")
+        before = bytes(await asyncio.wait_for(client.read_gatt_char(MODE), 5))
+        result = {"name": name, "address": device.address, "modes": modes,
+                  "before_hex": before.hex()}
+        if action != "status":
+            if action == "flash":
+                matches = [mode for mode, label in modes.items() if label.lower() == "day flash"]
+                if len(matches) != 1:
+                    raise RuntimeError(f"{name}: cannot identify Day Flash mode: {modes}")
+                target = matches[0]
+            else:
+                target = 0 if action == "off" else 5
+            # Only write a known mode when the light itself describes its purpose.
+            label = modes.get(target, "").lower()
+            accepted = label == "day flash" if action == "flash" else ((label == "off") if target == 0 else ("low" in label or "night steady" in label))
+            if not accepted:
+                raise RuntimeError(f"{name}: unrecognized mode {target}: {modes}; refusing write")
+            await asyncio.wait_for(client.write_gatt_char(MODE, bytes([target]), response=True), 5)
+            await asyncio.sleep(1)
+            after = bytes(await asyncio.wait_for(client.read_gatt_char(MODE), 5))
+            result.update(requested_mode=target, requested_label=modes[target], after_hex=after.hex())
+            if after != bytes([target]):
+                raise RuntimeError(f"Mode readback mismatch: {result}")
+        battery = await asyncio.wait_for(client.read_gatt_char(BATTERY), 5)
+        result["battery_percent"] = battery[0] if battery else None
+        print(json.dumps(result), flush=True)
+
+
+async def lights_command(args):
+    failed = False
+    for key in LIGHTS if args.light == "both" else [args.light]:
+        try:
+            await control(LIGHTS[key], args.action)
+        except Exception as exc:
+            print(json.dumps({"name": LIGHTS[key], "error": str(exc)}), flush=True)
+            failed = True
+    return 1 if failed else 0
+
+
+def is_sram(device, adv):
+    name = adv.local_name or device.name or ""
+    return "sram" in name.lower() or 0x0933 in adv.manufacturer_data or any(
+        u.startswith("d905") or u.startswith("0000fe51") for u in adv.service_uuids)
+
+
+async def sram_command(args):
+    if args.action == "scan":
+        devices = await BleakScanner.discover(timeout=args.seconds, return_adv=True)
+        results = [{"address": d.address, "name": a.local_name or d.name,
+                    "rssi": a.rssi, "services": a.service_uuids}
+                   for d, a in devices.values() if is_sram(d, a)]
+        print(json.dumps(results, indent=2))
+        return 0 if results else 1
+    if args.address:
+        device = await BleakScanner.find_device_by_address(args.address, timeout=args.seconds)
+    else:
+        device = await BleakScanner.find_device_by_filter(is_sram, timeout=args.seconds)
+    if device is None:
+        raise RuntimeError("SRAM not found: wake the derailleur and close the phone app")
+    report = {"timestamp": datetime.now(timezone.utc).isoformat(),
+              "address": device.address, "name": device.name, "services": [], "reads": {}}
+    print(json.dumps({"found": device.name, "address": device.address}), flush=True)
+    async with BleakClient(device, timeout=30) as client:
+        if args.action == "capture":
+            output = Path(__file__).resolve().parent / "data"
+            output.mkdir(exist_ok=True)
+            path = output / ("sram-capture-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".jsonl")
+            targets = [f"d905{s}{BASE}" for s in ("0002", "0003", "000b", "0024", "0025")
+                       if client.services.get_characteristic(f"d905{s}{BASE}")]
+            print("BASELINE: keep gears unchanged for 10 seconds", flush=True)
+            started = time.monotonic()
+            announced = False
+            count = 0
+            with path.open("w", buffering=1) as stream:
+                while time.monotonic() - started < args.seconds:
+                    if not announced and time.monotonic() - started >= 10:
+                        print("SHIFT NOW: rear shifts only", flush=True)
+                        announced = True
+                    for uuid in targets:
+                        row = {"timestamp": datetime.now(timezone.utc).isoformat(),
+                               "elapsed_s": time.monotonic() - started, "uuid": uuid,
+                               "address": device.address}
+                        try:
+                            raw = await asyncio.wait_for(client.read_gatt_char(uuid), 3)
+                            row["hex"] = raw.hex()
+                        except Exception as exc:
+                            row["error"] = str(exc)
+                        stream.write(json.dumps(row) + "\n")
+                        count += 1
+                    await asyncio.sleep(0.3)
+            print(f"DONE: {count} reads saved to {path}", flush=True)
+            return 0
+        for service in client.services:
+            report["services"].append({"uuid": service.uuid, "characteristics": [
+                {"uuid": ch.uuid, "properties": ch.properties} for ch in service.characteristics]})
+            for ch in service.characteristics:
+                standard_info = ch.uuid in {f"00002a{x}-0000-1000-8000-00805f9b34fb"
+                                            for x in ("24", "26", "27", "28", "29")}
+                if "read" not in ch.properties or not (ch.uuid in READABLE or standard_info):
+                    continue
+                try:
+                    raw = bytes(await asyncio.wait_for(client.read_gatt_char(ch), 5))
+                    value = {"hex": raw.hex(), "length": len(raw)}
+                    if ch.uuid == BATTERY and len(raw) == 1 and raw[0] <= 100:
+                        value["battery_percent"] = raw[0]
+                    if standard_info:
+                        value["text"] = raw.decode("utf-8", errors="replace")
+                    report["reads"][ch.uuid] = value
+                except Exception as exc:
+                    report["reads"][ch.uuid] = {"error": str(exc)}
+    output = Path(__file__).resolve().parent / "data"
+    output.mkdir(exist_ok=True)
+    path = output / ("sram-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S-%fZ") + ".json")
+    path.write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report, indent=2))
+    print(f"Saved: {path}")
+    return 0
+
+
+def decode_sram_battery(payload):
+    # Decode only the documented battery record, not identity/build records.
+    if len(payload) < 12 or payload[:2] != b"\x00\x00" or payload[4:7] != b"\x00\x04\x05":
+        return {"format": "unrecognized"}
+    voltage = int.from_bytes(payload[7:9], "little")
+    percent = payload[11]
+    return {"format": "documented_12_byte_prefix", "voltage_mv_candidate": voltage,
+            "battery_percent_candidate": percent if percent <= 100 else None,
+            "percent_supported": percent != 255,
+            "validation": "upstream decoder; not independently calibrated on this device"}
+
+
+async def batteries_command(seconds):
+    output = Path(__file__).resolve().parent / "data"
+    output.mkdir(exist_ok=True)
+    path = output / ("sram-batteries-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".jsonl")
+    latest = {}
+    with path.open("w", buffering=1) as stream:
+        def received(device, adv):
+            name = adv.local_name or device.name or ""
+            payload = adv.manufacturer_data.get(2355)
+            if "sram" not in name.lower() and payload is None:
+                return
+            row = {"timestamp": datetime.now(timezone.utc).isoformat(), "address": device.address,
+                   "name": name, "rssi": adv.rssi,
+                   "manufacturer_data": {str(k): v.hex() for k, v in adv.manufacturer_data.items()},
+                   "service_data": {k: v.hex() for k, v in adv.service_data.items()}}
+            if payload is not None:
+                row.update(decode_sram_battery(payload))
+            stream.write(json.dumps(row) + "\n")
+            if latest.get(device.address, {}).get("manufacturer_data") != row["manufacturer_data"] or device.address not in latest:
+                print(json.dumps(row), flush=True)
+            latest[device.address] = row
+        print(f"Listening for SRAM advertisements for {seconds}s", flush=True)
+        async with BleakScanner(received):
+            await asyncio.sleep(seconds)
+    print(f"Finished: {len(latest)} devices; saved {path}", flush=True)
+
+
+def public_key(private):
+    if len(private) != 16:
+        raise ValueError("Private key must be 16 bytes")
+    return pow(5, int.from_bytes(private, "little"), MODULUS).to_bytes(16, "big")
+
+
+def shared_key(private, peer):
+    value = int.from_bytes(peer, "big")
+    if len(private) != 16 or len(peer) != 16 or not 1 < value < MODULUS - 1:
+        raise ValueError("Invalid DH key")
+    return pow(value, int.from_bytes(private, "little"), MODULUS).to_bytes(16, "big")
+
+
+def decrypt(key, frame):
+    if len(frame) < 32:
+        raise ValueError("Frame shorter than nonce and authentication tag")
+    cipher = AES.new(key, AES.MODE_EAX, nonce=frame[:16], mac_len=16)
+    return cipher.decrypt_and_verify(frame[16:-16], frame[-16:])
+
+
+def store_key(path, key):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(key.hex() + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
+
+
+async def bond(client, path, diagnose=False):
+    inbox = asyncio.Queue()
+    await client.start_notify(BOND, lambda _, value: inbox.put_nowait(bytes(value)))
+    try:
+        print("Pairing: init", flush=True)
+        await asyncio.wait_for(client.write_gatt_char(BOND, bytes(range(16)), response=True), 8)
+        if diagnose:
+            trace = []
+            async def collect(stage):
+                packets = []
+                for _ in range(12):
+                    try:
+                        packet = await asyncio.wait_for(inbox.get(), 2)
+                    except asyncio.TimeoutError:
+                        break
+                    packets.append(packet)
+                trace.append({"stage": stage, "lengths": [len(p) for p in packets],
+                              "response_hex": b"".join(packets).hex()})
+                print(f"{stage}: notification lengths {[len(p) for p in packets]}", flush=True)
+            await collect("init")
+            await asyncio.wait_for(client.write_gatt_char(BOND, public_key(secrets.token_bytes(16)), response=True), 8)
+            await collect("public_key")
+            output = path.parent.parent / "data"
+            output.mkdir(exist_ok=True)
+            (output / "sram-handshake-diagnostic.json").write_text(json.dumps(trace, indent=2) + "\n")
+            raise RuntimeError("Diagnostic saved; no finalize sent and no key saved")
+        private = secrets.token_bytes(16)
+        print("Pairing: client public key", flush=True)
+        await asyncio.wait_for(client.write_gatt_char(BOND, public_key(private), response=True), 8)
+        peer = await asyncio.wait_for(inbox.get(), 8)
+        print(f"Pairing: first response {len(peer)} bytes", flush=True)
+        # Test whether older firmware packs the public key + transport blob
+        # across ATT-sized notifications instead of preserving message boundaries.
+        combined = peer
+        for _ in range(8):
+            if len(combined) >= 64:
+                break
+            part = await asyncio.wait_for(inbox.get(), 8)
+            print(f"Pairing: additional notification {len(part)} bytes", flush=True)
+            combined += part
+        if len(combined) != 64:
+            raise ValueError(f"Handshake response length {len(combined)}, expected 64")
+        shared = shared_key(private, combined[:16])
+        blob = combined[16:]
+        if len(blob) != 48:
+            raise ValueError(f"Key transport length {len(blob)}, expected 48")
+        key = decrypt(shared, blob)
+        if len(key) != 16:
+            raise ValueError("Invalid transported key length")
+        # Keep a recoverable local key even if the final BLE response is lost.
+        store_key(path, key)
+        print("Pairing: authenticated key saved; finalize", flush=True)
+        await asyncio.wait_for(client.write_gatt_char(BOND, b"\x73", response=True), 8)
+        print("Pairing completed (key not printed)", flush=True)
+        return key
+    finally:
+        if client.is_connected:
+            await client.stop_notify(BOND)
+
+
+async def bond_command(args):
+    root = Path(__file__).resolve().parent
+    path = root / ".secrets" / (args.address.replace(":", "").lower() + ".key")
+    if args.action == "bond" and not args.ready:
+        raise RuntimeError("Put the derailleur in AXS pairing mode, then pass --ready")
+    if args.action == "bond" and path.exists():
+        raise RuntimeError("A key already exists; use read to avoid replacing the bond")
+    device = await BleakScanner.find_device_by_address(args.address, timeout=30)
+    if device is None:
+        raise RuntimeError("SRAM device not found")
+    print(f"Connecting to {device.name}", flush=True)
+    async with BleakClient(device, timeout=30) as client:
+        key = await bond(client, path, args.diagnose) if args.action == "bond" else bytes.fromhex(path.read_text().strip())
+        report = {"timestamp": datetime.now(timezone.utc).isoformat(), "address": args.address,
+                  "characteristics": [ch.uuid for s in client.services for ch in s.characteristics],
+                  "reads": {}}
+        targets = ["d905" + short + BASE for short in
+                   ("000b", "0024", "0025", "0003", "0002", "0008", "0006", "0011", "0021", "0022")]
+        if args.all_readable:
+            targets = [ch.uuid for service in client.services for ch in service.characteristics
+                       if "read" in ch.properties and ch.uuid not in (BOND, "d905ee53" + BASE)]
+        report["user_reported_gear"] = args.gear_label
+        report["all_readable_except_bond_tokens"] = args.all_readable
+        for uuid in targets:
+            ch = client.services.get_characteristic(uuid)
+            if ch is None or "read" not in ch.properties:
+                continue
+            samples = []
+            for _ in range(2):
+                try:
+                    raw = bytes(await asyncio.wait_for(client.read_gatt_char(ch), 5))
+                    row = {"raw_hex": raw.hex(), "length": len(raw)}
+                    try:
+                        row["authenticated_plaintext_hex"] = decrypt(key, raw).hex()
+                    except ValueError:
+                        row["authenticated"] = False
+                    samples.append(row)
+                except Exception as exc:
+                    samples.append({"error": str(exc)})
+            report["reads"][uuid] = samples
+        output = root / "data"
+        output.mkdir(exist_ok=True)
+        target = output / ("sram-bond-probe-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".json")
+        target.write_text(json.dumps(report, indent=2) + "\n")
+        print(json.dumps(report, indent=2), flush=True)
+        print(f"Saved: {target}")
+
+
+
+def main():
+    """Run explicit BLE maintenance commands; live collection uses BikeTelemetry."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    lights = commands.add_parser("lights", help="Read or control Trek lights")
+    lights.add_argument("action", choices=["status", "on", "off", "flash"])
+    lights.add_argument("--light", choices=["front", "rear", "both"], default="both")
+
+    sram = commands.add_parser("sram", help="Inspect SRAM AXS via BLE")
+    sram.add_argument("action", choices=["scan", "probe", "capture"])
+    sram.add_argument("--address")
+    sram.add_argument("--seconds", type=float, default=20)
+
+    bond = commands.add_parser("sram_bond", help="Experimental SRAMBond")
+    bond.add_argument("action", choices=["bond", "read"])
+    bond.add_argument("--address", required=True)
+    bond.add_argument("--ready", action="store_true")
+    bond.add_argument("--diagnose", action="store_true")
+    bond.add_argument("--all-readable", action="store_true")
+    bond.add_argument("--gear-label")
+
+    batteries = commands.add_parser("sram_batteries", help="Capture SRAM battery advertisements")
+    batteries.add_argument("--seconds", type=float, default=45)
+
+    records = commands.add_parser("sram_records", help="Decode a saved SRAM probe")
+    records.add_argument("probe", type=Path)
+    records.add_argument("--output", type=Path)
+
+    args = parser.parse_args()
+    if args.command in {"sram", "sram_batteries"} and args.seconds <= 0:
+        parser.error("--seconds must be positive")
+    if args.command == "lights":
+        raise SystemExit(asyncio.run(lights_command(args)))
+    if args.command == "sram":
+        raise SystemExit(asyncio.run(sram_command(args)))
+    if args.command == "sram_bond":
+        try:
+            asyncio.run(bond_command(args))
+        except Exception as exc:
+            parser.exit(1, f"Failed: {type(exc).__name__}: {exc}\n")
+    if args.command == "sram_batteries":
+        asyncio.run(batteries_command(args.seconds))
+    if args.command == "sram_records":
+        probe = json.loads(args.probe.read_text())
+        samples = probe["reads"][SRAM_RECORD_UUID]
+        if isinstance(samples, dict):
+            samples = [samples]
+        report = {
+            "source": str(args.probe), "timestamp": probe.get("timestamp"),
+            "validation": "Experimental layout; voltage and status semantics unverified; not live data",
+            "samples": [extract_sram(bytes.fromhex(sample.get("raw_hex", sample.get("hex", ""))))
+                        for sample in samples],
+        }
+        rendered = json.dumps(report, indent=2) + "\n"
+        if args.output:
+            args.output.write_text(rendered)
+        print(rendered, end="")
+
+
+if __name__ == "__main__":
+    main()
